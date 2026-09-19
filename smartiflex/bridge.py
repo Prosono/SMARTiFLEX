@@ -53,8 +53,13 @@ def save_state(state):
 
 
 def cloud_url(value):
+    value = value.strip()
     parsed = urlsplit(value)
     local_test = parsed.scheme == "http" and os.getenv("SMARTIFLEX_ALLOW_LOCAL_HTTP") == "1" and parsed.hostname in ("localhost", "127.0.0.1")
+    if parsed.hostname in ("localhost", "127.0.0.1", "::1") and not local_test:
+        raise ValueError("localhost peker på Home Assistant-appen selv. Bruk HTTPS-adressen til SMARTi-backenden på Macen eller serveren.")
+    if parsed.hostname and parsed.hostname.endswith(".ui.nabu.casa"):
+        raise ValueError("Dette er Home Assistants Nabu Casa-adresse. Bruk HTTPS-adressen til SMARTi Flex-backenden i stedet.")
     if (parsed.scheme != "https" and not local_test) or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
         raise ValueError("Bruk en HTTPS-adresse uten sti, brukernavn eller parametere")
     return value.rstrip("/")
@@ -229,9 +234,20 @@ async def pair(body: PairRequest):
             try:
                 response = await client.post(base + "/api/agent/pair", json={"code": body.code})
                 response.raise_for_status()
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code == 401:
+                    raise HTTPException(400, "Engangskoden er ugyldig eller utløpt. Lag en ny kode i SMARTi-portalen.")
+                if error.response.status_code == 429:
+                    raise HTTPException(429, "For mange tilkoblingsforsøk. Vent ett minutt og prøv igjen.")
+                raise HTTPException(400, "Serveren avviste tilkoblingen. Kontroller at adressen går til SMARTi-backenden, ikke Home Assistant.")
             except httpx.HTTPError:
-                raise HTTPException(400, "Tilkoblingen mislyktes. Kontroller kode og serveradresse.")
-        paired = response.json()
+                raise HTTPException(400, "SMARTi-backenden kunne ikke nås over HTTPS. Kontroller at serveren eller testtunnelen kjører og er tilgjengelig fra Home Assistant.")
+        try:
+            paired = response.json()
+            if not isinstance(paired, dict) or not all(isinstance(paired.get(k), str) and paired[k] for k in ("token", "installation_id")):
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise HTTPException(400, "Adressen svarte, men ikke som en SMARTi-backend. Kontroller serveradressen.")
         state.update(cloud_url=base, token=paired["token"], installation_id=paired["installation_id"])
         save_state(state)
         return {"paired": True}
