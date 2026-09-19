@@ -1,5 +1,13 @@
 # Endringslogg
 
+## 0.4.0
+
+- Ny innstilling per enhet: regelmessig rapportering eller bare ved verdiendring.
+- Videreførte verdier beholder sensorens tidspunkt og får separat kontrolltid fra HA.
+- Utilgjengelige sensorer stopper sending; portalstatus utløper etter 45 sekunder.
+- Videreførte verdier brukes ikke som verifisert fleksibilitet.
+- Krever oppdatert SMARTi-backend og portal (migrering b27c419a8801).
+
 ## 0.3.1
 
 - Rettet hjelpetekst: kommunikasjonstest krever ikke måledata eller positivt effektanslag.

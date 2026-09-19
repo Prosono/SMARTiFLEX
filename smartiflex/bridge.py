@@ -11,6 +11,7 @@ from pathlib import Path
 import secrets
 from urllib.parse import urlsplit
 from uuid import uuid4
+from typing import Literal
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, FileResponse
@@ -65,8 +66,8 @@ def cloud_url(value):
     return value.rstrip("/")
 
 
-def power_sample(entity, max_age=45):
-    """Retain actual sensor observation time; never relabel stale values as current."""
+def power_sample(entity, max_age=45, hold=False):
+    """Preserve sensor time; opt-in held states get a separate HA check time."""
     try:
         value = Decimal(entity["state"])
         unit = entity.get("attributes", {}).get("unit_of_measurement")
@@ -74,12 +75,12 @@ def power_sample(entity, max_age=45):
             return None
         value *= 1000 if unit == "kW" else 1
         observed = parse_time(entity.get("last_reported") or entity["last_updated"])
-        if not -10 <= (utcnow() - observed).total_seconds() <= max_age:
+        if (utcnow() - observed).total_seconds() < -10 or (not hold and (utcnow() - observed).total_seconds() > max_age):
             return None
         watts = int(value.to_integral_value())
         if abs(watts) > 10_000_000:
             return None
-        return {"power_w": watts, "observed_at": observed.isoformat()}
+        return {"power_w": watts, "observed_at": observed.isoformat(), **({"checked_at": utcnow().isoformat()} if hold else {})}
     except (KeyError, ValueError, InvalidOperation, TypeError, AttributeError):
         return None
 
@@ -152,20 +153,20 @@ async def synchronize():
                     binding["sensor_state"] = str(entity.get("state", "ukjent"))[:100]
                     binding["sensor_unit"] = entity.get("attributes", {}).get("unit_of_measurement", "")
                     binding["sensor_observed_at"] = entity.get("last_reported") or entity.get("last_updated")
-                    # Preserve observation time. Historical values are useful in the portal,
-                    # but the server still excludes readings older than 45s from availability.
-                    sample = power_sample(entity, max_age=86390)
+                    # Preserve observation time. On-change checks are display-only;
+                    # they never qualify as fresh measured market capacity.
+                    sample = power_sample(entity, max_age=86390, hold=binding.get("reporting_mode") == "on_change")
                     if not sample:
                         binding["measurement_status"] = measurement_status(entity)
                         continue
                     binding["last_observed_at"] = sample["observed_at"]
                     binding["last_power_w"] = sample["power_w"]
-                    sample_id = hashlib.sha256((binding["local_id"] + binding.get("revision", "") + sample["observed_at"] + str(sample["power_w"])).encode()).hexdigest()
+                    sample_id = hashlib.sha256((binding["local_id"] + binding.get("revision", "") + sample.get("checked_at", sample["observed_at"]) + str(sample["power_w"])).encode()).hexdigest()
                     response = await client.post("/api/agent/telemetry", json={**sample, "sample_id": sample_id, "device_id": binding["device_id"]})
                     response.raise_for_status()
                     binding["last_upload_at"] = utcnow().isoformat()
                     age = (utcnow() - parse_time(sample["observed_at"])).total_seconds()
-                    binding["measurement_status"] = "Måling mottatt av SMARTi." if age <= 45 else "Siste måling mottatt av SMARTi, men den er for gammel for fleksibilitet."
+                    binding["measurement_status"] = "Videreført verdi · kontrollert i Home Assistant nå." if sample.get("checked_at") else "Måling mottatt av SMARTi." if age <= 45 else "Siste måling mottatt av SMARTi, men den er for gammel for fleksibilitet."
                 except httpx.HTTPError as error:
                     code = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
                     binding["measurement_status"] = f"SMARTi avviste synkroniseringen (HTTP {code}). Prøv igjen eller kontroller serveren." if code else "Kunne ikke sende til SMARTi. Prøver igjen automatisk."
@@ -326,6 +327,7 @@ async def entities():
 
 
 class BindingRequest(BaseModel):
+    reporting_mode: Literal["periodic", "on_change"] = "periodic"
     entity_id: str = Field(max_length=200)
     power_entity: str = Field(max_length=200)
     name: str = Field(min_length=1, max_length=120)

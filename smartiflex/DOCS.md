@@ -65,3 +65,9 @@ Målinger fra siste døgn sendes med sitt opprinnelige tidspunkt. Verdier eldre 
 45 sekunder teller ikke som tilgjengelig fleksibilitet. Ukjente/ugyldige verdier og
 målinger eldre enn ett døgn sendes ikke; appen viser hvorfor. Den oppdaterer aldri
 tidspunktet for å få en gammel sensorverdi til å se fersk ut.
+
+## Sensorer som bare rapporterer endringer
+
+Fra 0.4.0: Åpne enheten med **Rediger**, velg **Bare når verdien endres** under rapportering og lagre. Behold standardvalget for sensorer som rapporterer regelmessig. Eksisterende enheter endres ikke automatisk.
+
+SMARTi viderefører en gyldig verdi mens appen kan lese sensoren i HA. Portalen viser separat tidspunkt for sensorrapporten og HA-kontrollen. Ved utilgjengelig sensor eller mistet forbindelse stopper nye datapunkter, og status utløper etter 45 sekunder. Tidligere hull i historikken fylles ikke ut. Videreførte verdier brukes ikke som verifisert markedskapasitet.
