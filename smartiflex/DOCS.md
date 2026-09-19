@@ -15,13 +15,21 @@ Backend må settes opp separat før sammenkobling kan testes.
 
 ## Enheter og målinger
 
-Trykk **Hent enheter fra Home Assistant** og velg en switch-, climate- eller number-enhet,
-en dedikert effektsensor i W/kW, navn, estimert effekt og lokal maksimal varighet.
-Målingene synkroniseres normalt hvert 15. sekund. Gamle eller ugyldige sensorverdier
-blir ikke rapportert som ferske målinger.
+Trykk **Legg til enhet** og følg tre steg:
 
-Aktiver enheten separat i SMARTi-portalen. **Test kommunikasjon** kontrollerer
-kommandoflyten uten fysisk styring. Resultatet skal bli **Kommunikasjon bekreftet**.
+1. **Enhet:** Søk på navnet og velg en bryter, termostat eller tallstyring fra Home Assistant.
+2. **Måling:** Velg effektmålingen for denne enheten. Mulige matcher foreslås ut fra navn,
+   men du må selv bekrefte at målingen tilhører enheten. Ikke velg totalmåleren for boligen.
+3. **Bekreft:** Navnet fylles inn automatisk. Velg lokal testgrense i minutter og bekreft
+   at du vil dele effektmålingene med SMARTi.
+
+Under **Tilpass effektgrensen** kan du endre anslaget. Det forhåndsutfylles fra en positiv,
+ fersk effektmåling når den finnes, ellers 0. Dette er ikke en verifisert kapasitet. Ved 0
+ kan målinger deles, men kommunikasjonstest krever at et positivt anslag er konfigurert.
+
+Enheter og målinger som allerede er lagt til, vises ikke som nye valg.
+Synkronisering skjer normalt hvert 15. sekund. **Kommunikasjonstest** aktiveres separat
+ i portalen og gir ingen fysisk styring.
 
 ## Pause og frakobling
 

@@ -208,6 +208,16 @@ def logo():
     return FileResponse(Path(__file__).with_name("logo.png"), media_type="image/png")
 
 
+@app.get("/app.js")
+def script():
+    return FileResponse(Path(__file__).with_name("app.js"), media_type="text/javascript")
+
+
+@app.get("/style.css")
+def stylesheet():
+    return FileResponse(Path(__file__).with_name("style.css"), media_type="text/css")
+
+
 @app.get("/status")
 async def status():
     async with state_lock:
@@ -267,7 +277,16 @@ async def entities():
         states = await ha_states()
     except (httpx.HTTPError, ValueError):
         raise HTTPException(503, "Home Assistant er ikke tilgjengelig")
-    return [{"entity_id": e["entity_id"], "name": e.get("attributes", {}).get("friendly_name", e["entity_id"]), "unit": e.get("attributes", {}).get("unit_of_measurement"), "domain": e["entity_id"].split(".")[0]} for e in states if e["entity_id"].split(".")[0] in ("switch", "climate", "number") or e.get("attributes", {}).get("unit_of_measurement") in ("W", "kW")]
+    result = []
+    for entity in states:
+        domain = entity["entity_id"].split(".")[0]
+        attributes = entity.get("attributes", {})
+        unit = attributes.get("unit_of_measurement")
+        if domain not in ("switch", "climate", "number") and unit not in ("W", "kW"):
+            continue
+        sample = power_sample(entity)
+        result.append({"entity_id": entity["entity_id"], "name": attributes.get("friendly_name", entity["entity_id"]), "unit": unit, "domain": domain, "power_w": sample["power_w"] if sample else None})
+    return result
 
 
 class BindingRequest(BaseModel):
