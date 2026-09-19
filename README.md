@@ -29,7 +29,7 @@ Home Assistant OS med Supervisor kreves; appen installeres ikke gjennom HACS.
 En vellykket test vises som **Kommunikasjon bekreftet**. Du kan pause delingen lokalt
 eller trekke tilbake installasjonens tilgang fra portalen.
 
-## Status: utviklingsversjon 0.2.0
+## Status: utviklingsversjon 0.3.0
 
 - Målinger, lokal pause, samtykkekontroll og kommunikasjonstester er implementert.
 - **Ingen fysisk styring eller markedshandel.** Tester slår ikke utstyret av eller på.

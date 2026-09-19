@@ -1,6 +1,6 @@
 const $ = s => document.querySelector(s);
 const csrf = $('meta[name="csrf-token"]').content;
-let snapshot = null, entities = [], step = 1, device = null, sensor = null, pending = false;
+let snapshot = null, entities = [], step = 1, device = null, sensor = null, pending = false, editing = null;
 const names = {switch:'Bryter', climate:'Termostat', number:'Tallstyring'};
 const words = value => new Set(value.toLocaleLowerCase('nb-NO').replace(/[_.-]/g,' ').split(/\s+/).filter(w => w.length > 2 && !['sensor','switch','climate','number','power','effekt'].includes(w)));
 function score(a,b) { const tokens=words(a.name+' '+a.entity_id); return [...words(b.name+' '+b.entity_id)].filter(w=>tokens.has(w)).length; }
@@ -33,7 +33,7 @@ function choice(item, group, checked, description, suggested, select) {
 function drawChoices(){
   const deviceQuery=$('#device-search').value.toLocaleLowerCase('nb-NO');
   const sensorQuery=$('#sensor-search').value.toLocaleLowerCase('nb-NO');
-  const used=new Set((snapshot?.bindings||[]).flatMap(b=>[b.entity_id,b.power_entity]));
+  const used=new Set((snapshot?.bindings||[]).filter(b=>b.local_id!==editing?.local_id).flatMap(b=>[b.entity_id,b.power_entity]));
   const ds=entities.filter(e=>names[e.domain]&&!used.has(e.entity_id)&&(e.name+' '+e.entity_id).toLocaleLowerCase('nb-NO').includes(deviceQuery));
   $('#devices').replaceChildren(...ds.map(e=>choice(e,'device',device?.entity_id===e.entity_id,names[e.domain],false,item=>{if(device?.entity_id!==item.entity_id)sensor=null;device=item;})));
   const ss=entities.filter(e=>['W','kW'].includes(e.unit)&&!used.has(e.entity_id)&&(e.name+' '+e.entity_id).toLocaleLowerCase('nb-NO').includes(sensorQuery)).sort((a,b)=>(device?score(device,b)-score(device,a):0)||a.name.localeCompare(b.name,'nb'));
@@ -42,36 +42,51 @@ function drawChoices(){
 }
 function showStep(next){
   step=next;for(let i=1;i<=3;i++){$('#step-'+i).hidden=i!==step;const item=$(`[data-step="${i}"]`);if(i===step)item.setAttribute('aria-current','step');else item.removeAttribute('aria-current');}
-  $('#back').hidden=step===1;$('#next').textContent=step===3?'Legg til enheten':'Neste';$('#step-status').textContent=`Steg ${step} av 3`;
+  $('#back').hidden=step===1;$('#next').textContent=step===3?(editing?'Lagre endringer':'Legg til enheten'):'Neste';$('#step-status').textContent=`Steg ${step} av 3`;
   if(step===2){$('#sensor-intro').textContent=`Du har valgt ${device.name}. Velg målingen som viser hvor mye strøm den bruker akkurat nå.`;drawChoices();}
   if(step===3){$('#review').replaceChildren();const title=document.createElement('strong');title.textContent=device.name;const p=document.createElement('p');p.textContent='Effektmåling: '+sensor.name;$('#review').append(title,p);}
   controls();$('#step-'+step+' h2').focus();
 }
-async function start(){
+async function start(binding=null){
   await action(async()=>{
     $('#add').textContent='Henter enheter …';
-    try{entities=await request('entities');device=null;sensor=null;$('#device-search').value='';$('#sensor-search').value='';$('#confirm').checked=false;$('#wizard').hidden=false;drawChoices();showStep(1);$('#wizard').scrollIntoView({behavior:'instant',block:'start'});}
-    finally{$('#add').textContent='Legg til enhet ＋';}
+    try{
+      entities=await request('entities');editing=binding;device=null;sensor=null;
+      $('#device-search').value='';$('#sensor-search').value='';$('#confirm').checked=false;
+      $('#wizard').hidden=false;
+      if(binding){
+        device=entities.find(e=>e.entity_id===binding.entity_id)||null;
+        sensor=entities.find(e=>e.entity_id===binding.power_entity)||null;
+        $('#device-name').value=binding.name;$('#power').value=binding.estimated_w;
+        const duration=$('#duration');
+        if(![...duration.options].some(o=>Number(o.value)===binding.max_duration_seconds))duration.add(new Option(`${binding.max_duration_seconds/60} minutter`,String(binding.max_duration_seconds)));
+        duration.value=String(binding.max_duration_seconds);
+        $('#power-help').textContent='Ditt lagrede effektanslag. Du kan endre det her.';
+      }else{$('#duration').value='900';}
+      $('#edit-note').hidden=!binding;
+      drawChoices();showStep(binding&&device&&sensor?3:1);
+      $('#wizard').scrollIntoView({behavior:'instant',block:'start'});
+    }finally{$('#add').textContent='Legg til enhet ＋';}
   });
 }
 function close(){ $('#wizard').hidden=true;$('#add').focus(); }
 function renderBindings(){
   const bindings=snapshot.bindings;$('#count').textContent=`${bindings.length} ${bindings.length===1?'enhet':'enheter'}`;$('#bindings').replaceChildren();
   if(!bindings.length){const p=document.createElement('p');p.className='empty';p.textContent='Ingen enheter lagt til ennå. Start med én du kjenner godt.';$('#bindings').append(p);}
-  for(const b of bindings){const row=document.createElement('div');row.className='binding';const copy=document.createElement('div');const name=document.createElement('strong');name.textContent=b.name;const status=document.createElement('small');status.textContent=b.local_enabled?(b.device_id?'Koblet til SMARTi · deler målinger':'Venter på synkronisering med SMARTi'):'Deling pauset lokalt';const duration=document.createElement('small');duration.textContent=`Lokal grense: ${b.max_duration_seconds/60} minutter`;copy.append(name,status,duration);const button=document.createElement('button');button.className='quiet';button.textContent=b.local_enabled?'Pause deling':'Gjenoppta deling';button.onclick=()=>action(async()=>{await request('bindings/'+b.local_id+'/participation','POST',{enabled:!b.local_enabled});await refresh();});row.append(copy,button);$('#bindings').append(row);}
+  for(const b of bindings){const row=document.createElement('div');row.className='binding';const copy=document.createElement('div');const name=document.createElement('strong');name.textContent=b.name;const status=document.createElement('small');status.textContent=b.local_enabled?(b.device_id?'Koblet til SMARTi · deler målinger':'Venter på synkronisering med SMARTi'):'Deling pauset lokalt';const duration=document.createElement('small');duration.textContent=`Lokal grense: ${b.max_duration_seconds/60} minutter`;const diagnostic=document.createElement('small');diagnostic.textContent=b.measurement_status||'Venter på første måling.';const reading=document.createElement('small');reading.textContent=b.last_observed_at?`${b.last_power_w} W · målt ${new Date(b.last_observed_at).toLocaleString('nb-NO')}`:'';const edit=document.createElement('button');edit.className='quiet';edit.textContent='Rediger';edit.onclick=()=>start(b);const raw=document.createElement('small');raw.textContent=b.sensor_state!==undefined?`Home Assistant: ${b.sensor_state} ${b.sensor_unit||''} · ${b.sensor_observed_at?new Date(b.sensor_observed_at).toLocaleString('nb-NO'):'ukjent tidspunkt'}`:'';copy.append(name,status,duration,diagnostic,reading,raw);const actions=document.createElement('div');actions.className='binding-actions';actions.append(edit);const button=document.createElement('button');button.className='quiet';button.textContent=b.local_enabled?'Pause deling':'Gjenoppta deling';button.onclick=()=>action(async()=>{await request('bindings/'+b.local_id+'/participation','POST',{enabled:!b.local_enabled});await refresh();});actions.append(button);row.append(copy,actions);$('#bindings').append(row);}
 }
 async function refresh(){
   snapshot=await request('status');$('#loading').hidden=true;$('#setup').hidden=snapshot.paired;$('#connected').hidden=!snapshot.paired;
   $('#connection').textContent=snapshot.connection==='ONLINE'?'● Tilkoblet SMARTi · oppdatert '+new Date(snapshot.last_sync).toLocaleTimeString('nb-NO'):'Venter på kontakt med SMARTi';
   $('#server-address').textContent=snapshot.cloud_url||'';renderBindings();if(snapshot.error)message(snapshot.error,true);controls();
 }
-$('#add').onclick=start;$('#cancel').onclick=close;$('#back').onclick=()=>showStep(step-1);
+$('#add').onclick=()=>start();$('#cancel').onclick=close;$('#back').onclick=()=>showStep(step-1);
 $('#device-search').oninput=drawChoices;$('#sensor-search').oninput=drawChoices;$('#confirm').onchange=controls;
 $('#next').onclick=()=>{
-  if(step<3){if(step===2){$('#device-name').value=device.name;$('#power').value=String(Math.min(1000000,Math.max(0,sensor.power_w||0)));$('#power-help').textContent=sensor.power_w>0?'Forhåndsutfylt fra den ferske effektmålingen. Juster hvis du kjenner enhetens kapasitet.':'Ingen positiv, fersk effektmåling. Anslaget er satt til 0 til du kjenner kapasiteten.';}showStep(step+1);return;}
+  if(step<3){if(step===2&&!editing){$('#device-name').value=device.name;$('#power').value=String(Math.min(1000000,Math.max(0,sensor.power_w||0)));$('#power-help').textContent=sensor.power_w>0?'Forhåndsutfylt fra den ferske effektmålingen. Juster hvis du kjenner enhetens kapasitet.':'Ingen positiv, fersk effektmåling. Anslaget er satt til 0 til du kjenner kapasiteten.';}showStep(step+1);return;}
   const name=$('#device-name'),power=$('#power');if(!name.reportValidity()||!power.reportValidity())return;
   if(!name.value.trim()){message('Gi enheten et navn.',true);name.focus();return;}
-  void action(async()=>{await request('bindings','POST',{entity_id:device.entity_id,power_entity:sensor.entity_id,name:name.value.trim(),estimated_w:Number(power.value)||0,max_duration_seconds:Number($('#duration').value)});close();await refresh();message(`${name.value.trim()} er lagt til. Du kan aktivere kommunikasjonstest i SMARTi-portalen når enheten er synkronisert.`);});
+  void action(async()=>{await request(editing?'bindings/'+editing.local_id+'/edit':'bindings','POST',{entity_id:device.entity_id,power_entity:sensor.entity_id,name:name.value.trim(),estimated_w:Number(power.value)||0,max_duration_seconds:Number($('#duration').value)});close();await refresh();message(`${name.value.trim()} er ${editing?'oppdatert':'lagt til'}. Aktiver kommunikasjonstest i SMARTi-portalen når endringen er synkronisert.`);});
 };
 $('#pair').onsubmit=e=>{e.preventDefault();const form=e.currentTarget;void action(async()=>{await request('pair','POST',Object.fromEntries(new FormData(form)));form.reset();await refresh();message('Du er koblet til. Legg til den første enheten din.');});};
 $('#disconnect').onclick=()=>{if(confirm('Fjerne tilkoblingen og de lokale enhetskoblingene? Trekk også tilbake tilgangen i SMARTi-portalen.'))void action(async()=>{await request('disconnect','POST');close();await refresh();});};

@@ -65,7 +65,7 @@ def cloud_url(value):
     return value.rstrip("/")
 
 
-def power_sample(entity):
+def power_sample(entity, max_age=45):
     """Retain actual sensor observation time; never relabel stale values as current."""
     try:
         value = Decimal(entity["state"])
@@ -74,19 +74,29 @@ def power_sample(entity):
             return None
         value *= 1000 if unit == "kW" else 1
         observed = parse_time(entity.get("last_reported") or entity["last_updated"])
-        if not -10 <= (utcnow() - observed).total_seconds() <= 45:
+        if not -10 <= (utcnow() - observed).total_seconds() <= max_age:
             return None
         watts = int(value.to_integral_value())
         if abs(watts) > 10_000_000:
             return None
         return {"power_w": watts, "observed_at": observed.isoformat()}
-    except (KeyError, ValueError, InvalidOperation):
+    except (KeyError, ValueError, InvalidOperation, TypeError, AttributeError):
         return None
+
+
+def measurement_status(entity):
+    if not entity:
+        return "Fant ikke effektsensoren. Velg en ny under Rediger."
+    if entity.get("state") in ("unknown", "unavailable", None):
+        return "Effektsensoren er utilgjengelig i Home Assistant."
+    if entity.get("attributes", {}).get("unit_of_measurement") not in ("W", "kW"):
+        return "Sensoren må vise effekt i W eller kW."
+    return "Ingen gyldig måling fra siste døgn. Kontroller verdien og oppdateringene i Home Assistant."
 
 
 def evaluate_command(command, binding, consent):
     """Fail closed. The only enabled command is a non-actuating protocol test."""
-    if not binding or not binding.get("local_enabled"):
+    if not binding or not binding.get("local_enabled") or binding.get("needs_sync"):
         return {"status": "REJECTED", "error": "Local participation is disabled"}
     if not consent or not consent.get("enabled") or consent.get("consent_version") != command.get("consent_version"):
         return {"status": "REJECTED", "error": "Consent changed or is unavailable"}
@@ -123,18 +133,44 @@ async def synchronize():
             consents = {d["id"]: d for d in response.json()["devices"]}
             entities = {e["entity_id"]: e for e in await ha_states()}
             for binding in state["bindings"]:
-                if not binding.get("local_enabled"):
-                    continue
-                if not binding.get("device_id"):
-                    response = await client.post("/api/agent/devices", json={k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w")})
-                    response.raise_for_status()
-                    binding["device_id"] = response.json()["id"]
-                    save_state(state)
-                sample = power_sample(entities.get(binding["power_entity"], {}))
-                if sample:
-                    sample_id = hashlib.sha256((binding["local_id"] + sample["observed_at"] + str(sample["power_w"])).encode()).hexdigest()
+                try:
+                    if not binding.get("device_id"):
+                        response = await client.post("/api/agent/devices", json={k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w")})
+                        response.raise_for_status()
+                        binding["device_id"] = response.json()["id"]
+                        save_state(state)
+                    if binding.get("needs_sync"):
+                        response = await client.post(f"/api/agent/devices/{binding['device_id']}/configuration", json={**{k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w")}, "revision": binding["revision"]})
+                        response.raise_for_status()
+                        binding["needs_sync"] = False
+                        consents.pop(binding["device_id"], None)
+                        save_state(state)
+                    if not binding.get("local_enabled"):
+                        binding["measurement_status"] = "Deling er pauset lokalt."
+                        continue
+                    entity = entities.get(binding["power_entity"], {})
+                    binding["sensor_state"] = str(entity.get("state", "ukjent"))[:100]
+                    binding["sensor_unit"] = entity.get("attributes", {}).get("unit_of_measurement", "")
+                    binding["sensor_observed_at"] = entity.get("last_reported") or entity.get("last_updated")
+                    # Preserve observation time. Historical values are useful in the portal,
+                    # but the server still excludes readings older than 45s from availability.
+                    sample = power_sample(entity, max_age=86390)
+                    if not sample:
+                        binding["measurement_status"] = measurement_status(entity)
+                        continue
+                    binding["last_observed_at"] = sample["observed_at"]
+                    binding["last_power_w"] = sample["power_w"]
+                    sample_id = hashlib.sha256((binding["local_id"] + binding.get("revision", "") + sample["observed_at"] + str(sample["power_w"])).encode()).hexdigest()
                     response = await client.post("/api/agent/telemetry", json={**sample, "sample_id": sample_id, "device_id": binding["device_id"]})
                     response.raise_for_status()
+                    binding["last_upload_at"] = utcnow().isoformat()
+                    age = (utcnow() - parse_time(sample["observed_at"])).total_seconds()
+                    binding["measurement_status"] = "Måling mottatt av SMARTi." if age <= 45 else "Siste måling mottatt av SMARTi, men den er for gammel for fleksibilitet."
+                except httpx.HTTPError as error:
+                    code = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+                    binding["measurement_status"] = f"SMARTi avviste synkroniseringen (HTTP {code}). Prøv igjen eller kontroller serveren." if code else "Kunne ikke sende til SMARTi. Prøver igjen automatisk."
+                finally:
+                    save_state(state)
             response = await client.get("/api/agent/commands")
             response.raise_for_status()
             for command in response.json():
@@ -330,5 +366,29 @@ async def participation(local_id: str, body: ParticipationRequest):
         if not binding:
             raise HTTPException(404)
         binding["local_enabled"] = body.enabled
+        save_state(state)
+    return {"ok": True}
+
+
+@app.post("/bindings/{local_id}/edit")
+async def edit_binding(local_id: str, body: BindingRequest):
+    try:
+        items = {e["entity_id"]: e for e in await ha_states()}
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(503, "Home Assistant er ikke tilgjengelig")
+    domain = body.entity_id.split(".")[0]
+    if body.entity_id not in items or domain not in ("switch", "climate", "number") or items.get(body.power_entity, {}).get("attributes", {}).get("unit_of_measurement") not in ("W", "kW"):
+        raise HTTPException(422, "Velg en støttet enhet og en effektsensor i W eller kW")
+    async with state_lock:
+        state = load_state()
+        binding = next((b for b in state["bindings"] if b["local_id"] == local_id), None)
+        if not binding:
+            raise HTTPException(404)
+        if any(b["local_id"] != local_id and (b["entity_id"] == body.entity_id or b["power_entity"] == body.power_entity) for b in state["bindings"]):
+            raise HTTPException(409, "Enheten eller målingen brukes allerede av en annen enhet")
+        binding.update(body.model_dump())
+        binding.update(revision=str(uuid4()), needs_sync=True, kind="THERMOSTAT" if domain == "climate" else "GENERIC_LOAD" if domain == "number" else "SWITCH", capabilities={"switch": ["TURN_ON", "TURN_OFF"], "climate": ["SET_TEMPERATURE"], "number": []}[domain] + ["READ_POWER"], measurement_status="Endringen venter på synkronisering med SMARTi.")
+        for key in ("last_observed_at", "last_power_w", "last_upload_at"):
+            binding.pop(key, None)
         save_state(state)
     return {"ok": True}

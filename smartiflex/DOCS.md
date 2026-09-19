@@ -50,3 +50,18 @@ i portalen for å ugyldiggjøre installasjonens servertilgang.
   Issues, men ikke legg ved tilkoblingskoder, token eller private måledata.
 
 Denne utgaven støtter ikke fysisk aktivering, leveranseverifikasjon eller oppgjør.
+
+## Redigere en enhet
+
+Velg **Rediger** ved enheten. Endre navn, effektanslag eller tidsgrense i bekreftelsen.
+Bruk **Tilbake** for å endre effektsensor eller valgt enhet. Bekreft delingen og trykk
+**Lagre endringer**. Historikk og enhets-ID beholdes. Når endringen er synkronisert,
+må kommunikasjonstest aktiveres på nytt i portalen. Lokale pauser beholdes.
+
+## Målestatus
+
+Hver enhet viser om serveren har mottatt målingen, og hva Home Assistant rapporterer.
+Målinger fra siste døgn sendes med sitt opprinnelige tidspunkt. Verdier eldre enn
+45 sekunder teller ikke som tilgjengelig fleksibilitet. Ukjente/ugyldige verdier og
+målinger eldre enn ett døgn sendes ikke; appen viser hvorfor. Den oppdaterer aldri
+tidspunktet for å få en gammel sensorverdi til å se fersk ut.

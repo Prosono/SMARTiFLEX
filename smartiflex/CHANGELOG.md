@@ -1,5 +1,14 @@
 # Endringslogg
 
+## 0.3.0
+
+- Rediger eksisterende enheter: navn, valgt enhet/effektsensor, effektanslag og lokal varighet.
+- Endringer synkroniseres til backend med samme enhets-ID; kommunikasjonstest må aktiveres på nytt.
+- Målinger fra siste døgn sendes med opprinnelig tidspunkt. Eldre enn 45 sekunder gir fortsatt ingen tilgjengelig fleksibilitet.
+- Målestatus per enhet viser sensorverdi, tidspunkt, leveringsstatus og konkrete feil.
+- Feil ved sending for én enhet stopper ikke resten.
+- Krever oppdatert SMARTi-backend med endepunktet for enhetskonfigurasjon.
+
 ## 0.2.0
 
 - Ny veiviser: velg enhet, bekreft måling og legg til.
