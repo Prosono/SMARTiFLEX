@@ -1,5 +1,10 @@
 # Endringslogg
 
+## 0.3.1
+
+- Rettet hjelpetekst: kommunikasjonstest krever ikke måledata eller positivt effektanslag.
+- Tilhørende rettelse i SMARTi-backend og portal er nødvendig.
+
 ## 0.3.0
 
 - Rediger eksisterende enheter: navn, valgt enhet/effektsensor, effektanslag og lokal varighet.

@@ -1,5 +1,5 @@
 name: SMARTi Flex
-version: "0.3.0"
+version: "0.3.1"
 slug: smartiflex
 description: Secure SMARTi Flex connection, device selection and metering pilot
 url: https://github.com/Prosono/SMARTiFLEX

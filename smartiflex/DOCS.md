@@ -25,7 +25,7 @@ Trykk **Legg til enhet** og følg tre steg:
 
 Under **Tilpass effektgrensen** kan du endre anslaget. Det forhåndsutfylles fra en positiv,
  fersk effektmåling når den finnes, ellers 0. Dette er ikke en verifisert kapasitet. Ved 0
- kan målinger deles, men kommunikasjonstest krever at et positivt anslag er konfigurert.
+ kan målinger fortsatt deles. Kommunikasjonstesten krever bare aktivert testdeltakelse og forbindelse til Home Assistant, ikke måledata eller positivt effektanslag.
 
 Enheter og målinger som allerede er lagt til, vises ikke som nye valg.
 Synkronisering skjer normalt hvert 15. sekund. **Kommunikasjonstest** aktiveres separat
