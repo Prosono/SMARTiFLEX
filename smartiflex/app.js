@@ -51,7 +51,7 @@ async function start(binding=null){
   await action(async()=>{
     $('#add').textContent='Henter enheter …';
     try{
-      entities=await request('entities');editing=binding;device=null;sensor=null;$('#reporting-mode').value=binding?.reporting_mode||'periodic';
+      entities=await request('entities');editing=binding;device=null;sensor=null;$('#reporting-mode').value=binding?.reporting_mode||'on_change';
       $('#device-search').value='';$('#sensor-search').value='';$('#confirm').checked=false;
       $('#wizard').hidden=false;
       if(binding){

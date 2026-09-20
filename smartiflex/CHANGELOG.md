@@ -1,5 +1,11 @@
 # Endringslogg
 
+## 0.4.1
+
+- Endringsrapportering er standard for nye enheter og eldre oppsett uten rapporteringsvalg.
+- Eksplisitt valgt regelmessig rapportering beholdes.
+- Oppdatert portal viser videreførte, nylig kontrollerte verdier som aktive med søyler.
+
 ## 0.4.0
 
 - Ny innstilling per enhet: regelmessig rapportering eller bare ved verdiendring.

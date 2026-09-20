@@ -67,7 +67,7 @@ def cloud_url(value):
 
 
 def power_sample(entity, max_age=45, hold=False):
-    """Preserve sensor time; opt-in held states get a separate HA check time."""
+    """Preserve sensor time; held states get a separate HA check time."""
     try:
         value = Decimal(entity["state"])
         unit = entity.get("attributes", {}).get("unit_of_measurement")
@@ -155,7 +155,7 @@ async def synchronize():
                     binding["sensor_observed_at"] = entity.get("last_reported") or entity.get("last_updated")
                     # Preserve observation time. On-change checks are display-only;
                     # they never qualify as fresh measured market capacity.
-                    sample = power_sample(entity, max_age=86390, hold=binding.get("reporting_mode") == "on_change")
+                    sample = power_sample(entity, max_age=86390, hold=binding.get("reporting_mode", "on_change") == "on_change")
                     if not sample:
                         binding["measurement_status"] = measurement_status(entity)
                         continue
@@ -327,7 +327,7 @@ async def entities():
 
 
 class BindingRequest(BaseModel):
-    reporting_mode: Literal["periodic", "on_change"] = "periodic"
+    reporting_mode: Literal["periodic", "on_change"] = "on_change"
     entity_id: str = Field(max_length=200)
     power_entity: str = Field(max_length=200)
     name: str = Field(min_length=1, max_length=120)

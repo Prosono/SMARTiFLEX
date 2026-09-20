@@ -71,3 +71,5 @@ tidspunktet for å få en gammel sensorverdi til å se fersk ut.
 Fra 0.4.0: Åpne enheten med **Rediger**, velg **Bare når verdien endres** under rapportering og lagre. Behold standardvalget for sensorer som rapporterer regelmessig. Eksisterende enheter endres ikke automatisk.
 
 SMARTi viderefører en gyldig verdi mens appen kan lese sensoren i HA. Portalen viser separat tidspunkt for sensorrapporten og HA-kontrollen. Ved utilgjengelig sensor eller mistet forbindelse stopper nye datapunkter, og status utløper etter 45 sekunder. Tidligere hull i historikken fylles ikke ut. Videreførte verdier brukes ikke som verifisert markedskapasitet.
+
+Fra 0.4.1 er endringsrapportering standard også for gamle oppsett uten lagret valg. Har enheten allerede «Regelmessig», velg «Bare når verdien endres» under Rediger dersom sensoren bare rapporterer endringer. En uendret verdi vises aktiv mens HA-kontrollen fortsetter, men regnes ikke som verifisert markedskapasitet.
