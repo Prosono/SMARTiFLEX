@@ -1,4 +1,4 @@
-"""Home Assistant App: outbound-only pilot, no physical actuation in v0.1."""
+"""Outbound Home Assistant bridge with an opt-in, locally bounded switch pilot."""
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -21,8 +21,11 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None}
+VERSION = "0.5.0"
+runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
+control_lock = asyncio.Lock()
+blocked_local_ids = set()
 
 
 def utcnow():
@@ -42,15 +45,67 @@ def load_state():
     return json.loads(STATE_PATH.read_text())
 
 
-def save_state(state):
+def atomic_json(path, state):
     DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = STATE_PATH.with_suffix(".tmp")
+    temporary = path.with_suffix(".tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as output:
         json.dump(state, output)
         output.flush()
         os.fsync(output.fileno())
-    temporary.replace(STATE_PATH)
+    temporary.replace(path)
+    directory = os.open(DATA_DIR, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def save_state(state):
+    atomic_json(STATE_PATH, state)
+
+
+def load_control():
+    path = STATE_PATH.with_name("control.json")
+    return json.loads(path.read_text()) if path.exists() else {"commands": {}, "outbox": []}
+
+
+def save_control(journal):
+    # Never discard an unresolved restore or an unacknowledged result.
+    pending = {r["command_id"] for r in journal["outbox"]}
+    completed = [key for key, value in journal["commands"].items() if value["state"] in ("RESTORED", "REJECTED") and key not in pending]
+    for key in completed[:-1000]:
+        del journal["commands"][key]
+    atomic_json(STATE_PATH.with_name("control.json"), journal)
+
+
+def queue_control_result(journal, command_id, status, error=None, **evidence):
+    result = {"status": status, "evidence": evidence}
+    if error:
+        result["error"] = error
+    entry = journal["commands"][command_id]
+    entry["result"] = result
+    if not any(item["command_id"] == command_id and item["result"] == result for item in journal["outbox"]):
+        journal["outbox"].append({"id": str(uuid4()), "command_id": command_id, "installation_id": entry.get("installation_id"), "result": result})
+
+
+def cloud_control_current():
+    try:
+        return runtime.get("cloud_control_enabled") is True and 0 <= (utcnow() - parse_time(runtime["control_lease_at"])).total_seconds() <= 45
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
+def locally_permitted(binding, journal):
+    return bool(binding.get("physical_control_enabled") is True and binding.get("local_enabled") and not binding.get("needs_sync")
+        and binding.get("local_id") not in blocked_local_ids and binding.get("entity_id", "").startswith("switch.")
+        and not any(c["state"] == "RESTORE_FAILED" for c in journal["commands"].values()))
+
+
+def control_ready(binding, entity, journal):
+    return bool(locally_permitted(binding, journal) and entity and entity.get("state") == "on"
+        and not any(c["state"] not in ("RESTORED", "REJECTED") and (c.get("local_id") == binding.get("local_id") or c.get("entity_id") == binding.get("entity_id")) for c in journal["commands"].values()))
+
 
 
 def cloud_url(value):
@@ -95,21 +150,25 @@ def measurement_status(entity):
     return "Ingen gyldig måling fra siste døgn. Kontroller verdien og oppdateringene i Home Assistant."
 
 
-def evaluate_command(command, binding, consent):
-    """Fail closed. The only enabled command is a non-actuating protocol test."""
+def evaluate_command(command, binding, consent, *, physical_enabled=False):
+    """Validate local and server permission before any service is called."""
     if not binding or not binding.get("local_enabled") or binding.get("needs_sync"):
         return {"status": "REJECTED", "error": "Local participation is disabled"}
     if not consent or not consent.get("enabled") or consent.get("consent_version") != command.get("consent_version"):
         return {"status": "REJECTED", "error": "Consent changed or is unavailable"}
     try:
         end, start = parse_time(command["expires_at"]), parse_time(command["period_from"])
-        if end <= utcnow() or start > utcnow() or (end-start).total_seconds() > min(binding["max_duration_seconds"], consent["constraints"]["max_duration_seconds"]):
+        if end <= utcnow() or start > utcnow() or not 0 < (end-start).total_seconds() <= min(3600, binding["max_duration_seconds"], consent["constraints"]["max_duration_seconds"]):
             return {"status": "REJECTED", "error": "Command timing exceeds local constraints"}
-    except (KeyError, ValueError, TypeError):
+    except (KeyError, ValueError, TypeError, AttributeError):
         return {"status": "REJECTED", "error": "Invalid command timing"}
-    if command.get("command") != "VERIFY_CONNECTION" or command.get("simulation") is not True:
-        return {"status": "REJECTED", "error": "Physical control is not enabled in this release"}
-    return {"status": "SIMULATED"}
+    if command.get("command") == "VERIFY_CONNECTION" and command.get("simulation") is True:
+        return {"status": "SIMULATED"}
+    if (command.get("command") == "REDUCE_LOAD" and command.get("simulation") is False
+        and physical_enabled is True and binding.get("physical_control_enabled") is True and binding.get("local_id") not in blocked_local_ids
+        and binding.get("entity_id", "").startswith("switch.")):
+        return {"status": "READY"}
+    return {"status": "REJECTED", "error": "Physical control is not permitted for this device"}
 
 
 async def ha_states():
@@ -122,17 +181,213 @@ async def ha_states():
         return response.json()
 
 
-async def synchronize():
+async def ha_entity(entity_id):
+    if not entity_id.startswith("switch.") or any(c in entity_id for c in ("/", "?", "#")):
+        raise ValueError("Only local switch entities are supported")
+    token = os.getenv("SUPERVISOR_TOKEN")
+    if not token:
+        raise ValueError("Supervisor access is not available")
+    async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
+        response = await client.get("http://supervisor/core/api/states/" + entity_id, headers={"Authorization": f"Bearer {token}"})
+        response.raise_for_status()
+        entity = response.json()
+        if entity.get("entity_id") != entity_id:
+            raise ValueError("Unexpected Home Assistant entity")
+        return entity
+
+
+async def ha_switch(entity_id, service):
+    if service not in ("turn_on", "turn_off") or not entity_id.startswith("switch."):
+        raise ValueError("Unsupported local service")
+    token = os.getenv("SUPERVISOR_TOKEN")
+    if not token:
+        raise ValueError("Supervisor access is not available")
+    async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
+        response = await client.post("http://supervisor/core/api/services/switch/" + service,
+            headers={"Authorization": f"Bearer {token}"}, json={"entity_id": entity_id})
+        response.raise_for_status()
+        states = response.json()
+        return next((e for e in states if e.get("entity_id") == entity_id), None) if isinstance(states, list) else None
+
+
+def state_signature(entity):
+    return {"changed": entity.get("last_changed"), "context": entity.get("context", {}).get("id")}
+
+
+def restore_failed(journal, command_id, message):
+    item = journal["commands"][command_id]
+    item["state"] = "RESTORE_FAILED"
+    item["local_error"] = message
+    queue_control_result(journal, command_id, "RESTORE_FAILED", message, restored=False)
+    save_control(journal)
+
+
+def restore_done(journal, command_id):
+    item = journal["commands"][command_id]
+    item["state"] = "RESTORED"
+    item.pop("local_error", None)
+    queue_control_result(journal, command_id, "RESTORED", restored=True, observed_at=utcnow().isoformat())
+    save_control(journal)
+
+
+async def restore_pending(*, force=False, local_id=None):
+    """Independent of cloud retries, pairing, and the main synchronization lock."""
+    async with control_lock:
+        journal = load_control()
+        try:
+            bindings = {b["local_id"]: b for b in load_state()["bindings"]}
+        except (ValueError, KeyError, TypeError):
+            bindings = {}  # Corrupt/missing permission data must not extend a lease.
+            force = True
+
+        async def restore_one(command_id, item):
+            binding = bindings.get(item["local_id"], {})
+            try:
+                entity = await ha_entity(item["entity_id"])
+                if entity.get("state") == "on":
+                    # The user/another automation may have already restored it.
+                    restore_done(journal, command_id)
+                    return
+                if entity.get("state") != "off":
+                    restore_failed(journal, command_id, "Bryteren er utilgjengelig. Kontroller den i Home Assistant.")
+                    return
+                # A network read may itself have crossed the deadline or pause.
+                due = (force or item["state"] in ("PREPARED", "RESTORE_FAILED") or utcnow() >= parse_time(item["expires_at"])
+                    or not cloud_control_current() or command_id not in runtime.get("active_dispatch_ids", [])
+                    or item["local_id"] in blocked_local_ids or not binding.get("local_enabled") or not binding.get("physical_control_enabled")
+                    or binding.get("entity_id") != item["entity_id"] or binding.get("needs_sync"))
+                if not due:
+                    return
+                signature = item.get("off_signature")
+                if (signature and signature != state_signature(entity)) or (not signature and entity.get("context", {}).get("user_id")):
+                    # Do not undo a newer manual/automation change to the switch.
+                    restore_failed(journal, command_id, "Bryteren ble endret etter styringen. Slå den på manuelt for å avslutte testen.")
+                    return
+                await ha_switch(item["entity_id"], "turn_on")
+                after = await ha_entity(item["entity_id"])
+                if after.get("state") != "on":
+                    restore_failed(journal, command_id, "Bryteren bekreftet ikke på. Kontroller den i Home Assistant.")
+                    return
+                restore_done(journal, command_id)
+            except (httpx.HTTPError, ValueError, TypeError, KeyError):
+                restore_failed(journal, command_id, "Kunne ikke gjenopprette bryteren. Prøver igjen; kontroller Home Assistant.")
+
+        # Independent switches must not wait in line behind an unavailable HA
+        # entity. Journal updates are synchronous under the one journal lock;
+        # await every task, including failures, before releasing that lock.
+        outcomes = await asyncio.gather(*(restore_one(command_id, item) for command_id, item in list(journal["commands"].items())
+            if item["state"] not in ("RESTORED", "REJECTED") and (not local_id or item["local_id"] == local_id)), return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+
+
+async def execute_physical(command, binding, consent):
+    async with control_lock:
+        journal = load_control()
+        command_id = command["id"]
+        if command_id in journal["commands"]:
+            return  # Durable execution history prevents a second turn_off.
+        decision = evaluate_command(command, binding, consent, physical_enabled=cloud_control_current())
+        if decision["status"] == "READY" and command_id not in runtime.get("active_dispatch_ids", []):
+            decision = {"status": "REJECTED", "error": "Server control permission is no longer current"}
+        if decision["status"] == "READY":
+            try:
+                entity = await ha_entity(binding["entity_id"])
+                if not control_ready(binding, entity, journal):
+                    decision = {"status": "REJECTED", "error": "Bryteren må være på og uten uavklart tidligere styring"}
+            except (httpx.HTTPError, ValueError, TypeError):
+                decision = {"status": "REJECTED", "error": "Bryteren kunne ikke kontrolleres i Home Assistant"}
+            if decision["status"] == "READY":
+                # Network reads may have crossed expiry or a local pause.
+                decision = evaluate_command(command, binding, consent, physical_enabled=cloud_control_current())
+                if decision["status"] == "READY" and command_id not in runtime.get("active_dispatch_ids", []):
+                    decision = {"status": "REJECTED", "error": "Server control permission is no longer current"}
+        if decision["status"] != "READY":
+            journal["commands"][command_id] = {"state": "REJECTED", "installation_id": load_state().get("installation_id")}
+            queue_control_result(journal, command_id, "REJECTED", decision.get("error", "Unsupported command"))
+            save_control(journal)
+            return
+        # This independent journal is fsynced before the external effect. It is
+        # retained on disconnect/edit and the watchdog restores after restart.
+        item = {"state": "PREPARED", "installation_id": load_state().get("installation_id"), "entity_id": binding["entity_id"], "local_id": binding["local_id"],
+            "device_id": command["device_id"], "expires_at": command["expires_at"], "prepared_at": utcnow().isoformat()}
+        journal["commands"][command_id] = item
+        save_control(journal)
+        try:
+            changed = await ha_switch(binding["entity_id"], "turn_off")
+            # Capture action-owned identity before a verification read, so a
+            # subsequent manual change cannot become our restoration target.
+            if changed and changed.get("state") == "off":
+                item["off_signature"] = state_signature(changed)
+                save_control(journal)
+            after = await ha_entity(binding["entity_id"])
+            if after.get("state") != "off":
+                raise ValueError("Switch did not confirm off")
+            if item.get("off_signature") and item["off_signature"] != state_signature(after):
+                raise ValueError("Switch changed during execution")
+            item.setdefault("off_signature", state_signature(after))
+            item["state"] = "ACTIVE"
+            queue_control_result(journal, command_id, "EXECUTED", physical_execution=True, observed_at=utcnow().isoformat())
+            save_control(journal)
+        except (httpx.HTTPError, ValueError, TypeError):
+            # A timeout may have happened after HA applied turn_off. Never retry
+            # the reduction; retain PREPARED and let restoration resolve it.
+            queue_control_result(journal, command_id, "FAILED", "Bryteren bekreftet ikke styringen. Gjenoppretting pågår.", physical_execution=False)
+            save_control(journal)
+
+
+async def flush_control_results(client):
+    while True:
+        async with control_lock:
+            installation_id = load_state().get("installation_id")
+            outbox = [item for item in load_control()["outbox"] if item.get("installation_id") == installation_id]
+            if not outbox:
+                return
+            item = outbox[0]
+        response = await client.post(f"/api/agent/commands/{item['command_id']}/result", json=item["result"])
+        response.raise_for_status()
+        async with control_lock:
+            journal = load_control()
+            journal["outbox"] = [r for r in journal["outbox"] if r["id"] != item["id"]]
+            save_control(journal)
+
+
+async def restore_watchdog():
+    # Cloud outage/backoff must not extend a physical action. A process or HA
+    # host outage cannot be timed out by software that is no longer running.
+    while True:
+        try:
+            await restore_pending()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error("Local restoration failed (%s)", type(error).__name__)
+            runtime["error"] = "Lokal gjenoppretting trenger tilsyn. Kontroller bryterne i Home Assistant."
+        await asyncio.sleep(2)
+
+
+async def _synchronize():
     async with state_lock:
         state = load_state()
         if not state.get("token"):
             return
         base = cloud_url(state["cloud_url"])
         async with httpx.AsyncClient(base_url=base, headers={"Authorization": f"Bearer {state['token']}"}, timeout=10, follow_redirects=False) as client:
-            response = await client.post("/api/agent/heartbeat")
-            response.raise_for_status()
-            consents = {d["id"]: d for d in response.json()["devices"]}
             entities = {e["entity_id"]: e for e in await ha_states()}
+            async def heartbeat():
+                journal = load_control()
+                ready = [b["device_id"] for b in state["bindings"] if b.get("device_id") and locally_permitted(b, journal)]
+                reply = await client.post("/api/agent/heartbeat", json={"version": VERSION, "control_ready_device_ids": ready})
+                reply.raise_for_status()
+                payload = reply.json()
+                active = payload.get("active_dispatch_ids")
+                runtime.update(cloud_control_enabled=payload.get("physical_control_enabled") is True and isinstance(active, list),
+                    active_dispatch_ids=active if isinstance(active, list) else [], control_lease_at=utcnow().isoformat())
+                return {d["id"]: d for d in payload["devices"]}
+            consents = await heartbeat()
+            await restore_pending()
+            await flush_control_results(client)
             for binding in state["bindings"]:
                 try:
                     if not binding.get("device_id"):
@@ -174,7 +429,15 @@ async def synchronize():
                     save_state(state)
             response = await client.get("/api/agent/commands")
             response.raise_for_status()
-            for command in response.json():
+            commands = response.json()
+            if any(c.get("simulation") is False for c in commands):
+                consents = await heartbeat()
+                await restore_pending()
+            for command in commands:
+                if command.get("simulation") is False:
+                    binding = next((b for b in state["bindings"] if b.get("device_id") == command["device_id"]), None)
+                    await execute_physical(command, binding, consents.get(command["device_id"]))
+                    continue
                 processed = state.setdefault("processed", {})
                 result = processed.get(command["id"])
                 if not result:
@@ -187,7 +450,18 @@ async def synchronize():
                 response = await client.post(f"/api/agent/commands/{command['id']}/result", json=result)
                 if response.status_code != 409:
                     response.raise_for_status()
+            await restore_pending()
+            await flush_control_results(client)
             runtime.update(connection="ONLINE", last_sync=utcnow().isoformat(), error=None)
+
+
+async def synchronize():
+    try:
+        await _synchronize()
+    except Exception:
+        runtime.update(cloud_control_enabled=False, active_dispatch_ids=[], control_lease_at=None)
+        await restore_pending(force=True)
+        raise
 
 
 async def worker():
@@ -208,13 +482,18 @@ async def worker():
 
 @asynccontextmanager
 async def lifespan(_):
+    # A restart cancels all old leases even if their end time is in the future.
+    await restore_pending(force=True)
     task = asyncio.create_task(worker())
-    yield
-    task.cancel()
+    watchdog = asyncio.create_task(restore_watchdog())
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        yield
+    finally:
+        task.cancel()
+        watchdog.cancel()
+        await asyncio.gather(task, watchdog, return_exceptions=True)
+        runtime.update(cloud_control_enabled=False, active_dispatch_ids=[])
+        await restore_pending(force=True)
 
 
 app = FastAPI(title="SMARTi Flex Home Assistant App", lifespan=lifespan)
@@ -259,7 +538,9 @@ def stylesheet():
 async def status():
     async with state_lock:
         state = load_state()
-        return {**runtime, "paired": bool(state.get("token")), "cloud_url": state.get("cloud_url"), "bindings": state["bindings"], "physical_control_enabled": False}
+        journal = load_control()
+        controls = [{"device_id": c.get("device_id"), "local_id": c.get("local_id"), "status": c["state"], "expires_at": c.get("expires_at"), "error": c.get("local_error")} for c in journal["commands"].values() if c["state"] not in ("RESTORED", "REJECTED")]
+        return {**runtime, "version": VERSION, "paired": bool(state.get("token")), "cloud_url": state.get("cloud_url"), "bindings": state["bindings"], "physical_control_enabled": cloud_control_current(), "controls": controls, "pending_control_results": len(journal["outbox"])}
 
 
 class PairRequest(BaseModel):
@@ -302,6 +583,8 @@ async def pair(body: PairRequest):
 
 @app.post("/disconnect")
 async def disconnect():
+    runtime.update(cloud_control_enabled=False, active_dispatch_ids=[], control_lease_at=None)
+    await restore_pending(force=True)
     async with state_lock:
         save_state({"bindings": [], "processed": {}})
         runtime.update(connection="UNKNOWN", last_sync=None, error=None)
@@ -351,7 +634,7 @@ async def bind(body: BindingRequest):
             raise HTTPException(409, "Koble til SMARTi først")
         if any(b["entity_id"] == body.entity_id or b["power_entity"] == body.power_entity for b in state["bindings"]):
             raise HTTPException(409, "Enheten eller effektsensoren er allerede valgt")
-        state["bindings"].append({**body.model_dump(), "local_id": str(uuid4()), "device_id": None, "kind": "THERMOSTAT" if domain == "climate" else "GENERIC_LOAD" if domain == "number" else "SWITCH", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True})
+        state["bindings"].append({**body.model_dump(), "local_id": str(uuid4()), "device_id": None, "kind": "THERMOSTAT" if domain == "climate" else "GENERIC_LOAD" if domain == "number" else "SWITCH", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True, "physical_control_enabled": False})
         save_state(state)
         return {"ok": True}
 
@@ -362,13 +645,46 @@ class ParticipationRequest(BaseModel):
 
 @app.post("/bindings/{local_id}/participation")
 async def participation(local_id: str, body: ParticipationRequest):
+    if not body.enabled:
+        blocked_local_ids.add(local_id)
+        await restore_pending(force=True, local_id=local_id)
     async with state_lock:
         state = load_state()
         binding = next((b for b in state["bindings"] if b["local_id"] == local_id), None)
         if not binding:
             raise HTTPException(404)
         binding["local_enabled"] = body.enabled
+        if not body.enabled:
+            binding["physical_control_enabled"] = False
         save_state(state)
+    if not body.enabled:
+        await restore_pending(force=True, local_id=local_id)
+    return {"ok": True}
+
+
+@app.post("/bindings/{local_id}/control")
+async def local_control(local_id: str, body: ParticipationRequest):
+    if not body.enabled:
+        blocked_local_ids.add(local_id)
+        await restore_pending(force=True, local_id=local_id)
+    async with state_lock:
+        state = load_state()
+        binding = next((b for b in state["bindings"] if b["local_id"] == local_id), None)
+        if not binding:
+            raise HTTPException(404)
+        if body.enabled:
+            if not state.get("token") or not binding.get("local_enabled") or binding.get("needs_sync"):
+                raise HTTPException(409, "Koble til, gjenoppta deling og vent på synkronisering først")
+            if not binding.get("entity_id", "").startswith("switch."):
+                raise HTTPException(422, "Pilotstyring støtter bare brytere")
+            if any(c["state"] == "RESTORE_FAILED" or (c.get("local_id") == local_id and c["state"] not in ("RESTORED", "REJECTED")) for c in load_control()["commands"].values()):
+                raise HTTPException(409, "Avslutt eller gjenopprett den pågående styringen først")
+        binding["physical_control_enabled"] = body.enabled
+        if body.enabled:
+            blocked_local_ids.discard(local_id)
+        save_state(state)
+    if not body.enabled:
+        await restore_pending(force=True, local_id=local_id)
     return {"ok": True}
 
 
@@ -381,6 +697,8 @@ async def edit_binding(local_id: str, body: BindingRequest):
     domain = body.entity_id.split(".")[0]
     if body.entity_id not in items or domain not in ("switch", "climate", "number") or items.get(body.power_entity, {}).get("attributes", {}).get("unit_of_measurement") not in ("W", "kW"):
         raise HTTPException(422, "Velg en støttet enhet og en effektsensor i W eller kW")
+    blocked_local_ids.add(local_id)
+    await restore_pending(force=True, local_id=local_id)
     async with state_lock:
         state = load_state()
         binding = next((b for b in state["bindings"] if b["local_id"] == local_id), None)
@@ -389,8 +707,10 @@ async def edit_binding(local_id: str, body: BindingRequest):
         if any(b["local_id"] != local_id and (b["entity_id"] == body.entity_id or b["power_entity"] == body.power_entity) for b in state["bindings"]):
             raise HTTPException(409, "Enheten eller målingen brukes allerede av en annen enhet")
         binding.update(body.model_dump())
+        binding["physical_control_enabled"] = False
         binding.update(revision=str(uuid4()), needs_sync=True, kind="THERMOSTAT" if domain == "climate" else "GENERIC_LOAD" if domain == "number" else "SWITCH", capabilities={"switch": ["TURN_ON", "TURN_OFF"], "climate": ["SET_TEMPERATURE"], "number": []}[domain] + ["READ_POWER"], measurement_status="Endringen venter på synkronisering med SMARTi.")
         for key in ("last_observed_at", "last_power_w", "last_upload_at"):
             binding.pop(key, None)
         save_state(state)
+    await restore_pending(force=True, local_id=local_id)
     return {"ok": True}

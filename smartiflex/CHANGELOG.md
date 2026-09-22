@@ -1,5 +1,14 @@
 # Endringslogg
 
+## 0.5.0
+
+- Lokal tillatelse for av/på-pilot per bryter. Fysisk styring er av som standard og krever separat åpning på SMARTi-serveren.
+- Varig tilbakeføringsjournal før styring, lokal overvåker og tilbakeføring ved utløp, pause, frakobling eller omstart.
+- Resultatkvitteringer lagres og sendes på nytt; doble kommandoer og nyere manuelle endringer håndteres.
+- Synlig stoppknapp og oppfølging når tilbakeføring må kontrolleres.
+- Målinger og kommunikasjonstester fungerer fortsatt uten fysisk tillatelse. Ingen markedsordre eller utbetaling opprettes av appen.
+- Krever oppdatert SMARTi-backend (migrering h031e0a8b719). Test på egnet utstyr før fysisk pilotbruk; brytere uten kontakt kan ikke garanteres tilbakeført.
+
 ## 0.4.1
 
 - Endringsrapportering er standard for nye enheter og eldre oppsett uten rapporteringsvalg.

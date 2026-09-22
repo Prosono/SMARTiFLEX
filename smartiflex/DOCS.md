@@ -49,7 +49,8 @@ i portalen for å ugyldiggjøre installasjonens servertilgang.
 - **Installasjon eller oppstart feiler:** Se appens logg. Rapportér feilen i repositoryets
   Issues, men ikke legg ved tilkoblingskoder, token eller private måledata.
 
-Denne utgaven støtter ikke fysisk aktivering, leveranseverifikasjon eller oppgjør.
+Fysisk av/på-pilot for brytere er tilgjengelig fra 0.5.0, avslått som standard.
+Appen utfører ikke leveranseverifikasjon eller oppgjør.
 
 ## Redigere en enhet
 
@@ -73,3 +74,35 @@ Fra 0.4.0: Åpne enheten med **Rediger**, velg **Bare når verdien endres** unde
 SMARTi viderefører en gyldig verdi mens appen kan lese sensoren i HA. Portalen viser separat tidspunkt for sensorrapporten og HA-kontrollen. Ved utilgjengelig sensor eller mistet forbindelse stopper nye datapunkter, og status utløper etter 45 sekunder. Tidligere hull i historikken fylles ikke ut. Videreførte verdier brukes ikke som verifisert markedskapasitet.
 
 Fra 0.4.1 er endringsrapportering standard også for gamle oppsett uten lagret valg. Har enheten allerede «Regelmessig», velg «Bare når verdien endres» under Rediger dersom sensoren bare rapporterer endringer. En uendret verdi vises aktiv mens HA-kontrollen fortsetter, men regnes ikke som verifisert markedskapasitet.
+
+## Av/på-pilot for brytere (0.5.0)
+
+Vanlig måling og kommunikasjonstest virker som før. Ingen fysisk styring blir automatisk
+aktivert når du oppdaterer appen.
+
+For en egnet bryter kan du velge **Tillat av/på-test** og bekrefte lokalt. Deling må være
+aktiv, samtykke må være gitt i portalen, og SMARTi-operatøren må særskilt ha åpnet
+pilotstyring på serveren. Termostater og tallstyringer har fortsatt bare målinger og
+kommunikasjonstest. Velg bare utstyr som tåler å avbrytes og slås på igjen.
+
+En fysisk test kontrollerer at bryteren er på før den slås av. Lokal og sentral tidsgrense
+må overholdes. Appen lagrer en egen tilbakeføringsjournal før den slår av bryteren, og
+kontrollerer deretter tilstanden i Home Assistant. **Stopp styring** ber om tilbakeføring.
+Pause, redigering og frakobling opphever den lokale tillatelsen.
+
+En lokal overvåker forsøker å slå på igjen når tiden er ute, når tillatelsen forsvinner,
+eller når forbindelsen til SMARTi svikter. Den virker uavhengig av sending av måledata.
+Tilbakeføringsjournalen beholdes også ved frakobling og omstart. Ikke slett den for å
+fjerne en feilmelding. Appen må kjøre og nå bryteren for å kunne tilbakeføre; en avslått
+eller havarert HA-maskin kan ikke garantere tidsfristen.
+
+Hvis bryteren er endret manuelt eller av en annen automasjon etter testen, blir dette
+ikke automatisk overstyrt. Ved uavklart tilbakeføring vises en feil, og ny fysisk styring
+sperres. Kontroller bryteren i Home Assistant og slå den på manuelt når det er riktig.
+Etter frakobling kan operatøren også måtte følge opp en gammel kommando som ikke fikk
+levert siste kvittering.
+
+«Utført» og «Tilbakeført» beskriver bryterens HA-tilstand. De beviser ikke levert
+fleksibilitet og utløser ingen betaling. Oppdater SMARTi-backenden før appen brukes
+(migrering h031e0a8b719). Fysisk pilotstyring krever separat validering på den installerte
+Supervisor-appen før den åpnes på serveren.

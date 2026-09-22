@@ -12,7 +12,7 @@ async function request(path,method='GET',body) {
   return data;
 }
 function controls(){
-  document.querySelectorAll('button').forEach(b=>b.disabled=pending);
+  document.querySelectorAll('button').forEach(b=>b.disabled=pending || b.dataset.unavailable==='true');
   $('#next').disabled=pending || (step===1?!device:step===2?!sensor:!$('#confirm').checked);
 }
 async function action(fn){
@@ -71,14 +71,47 @@ async function start(binding=null){
 }
 function close(){ $('#wizard').hidden=true;$('#add').focus(); }
 function renderBindings(){
-  const bindings=snapshot.bindings;$('#count').textContent=`${bindings.length} ${bindings.length===1?'enhet':'enheter'}`;$('#bindings').replaceChildren();
+  const bindings=snapshot.bindings;
+  $('#count').textContent=`${bindings.length} ${bindings.length===1?'enhet':'enheter'}`;
+  $('#bindings').replaceChildren();
   if(!bindings.length){const p=document.createElement('p');p.className='empty';p.textContent='Ingen enheter lagt til ennå. Start med én du kjenner godt.';$('#bindings').append(p);}
-  for(const b of bindings){const row=document.createElement('div');row.className='binding';const copy=document.createElement('div');const name=document.createElement('strong');name.textContent=b.name;const status=document.createElement('small');status.textContent=b.local_enabled?(b.device_id?'Koblet til SMARTi · deler målinger':'Venter på synkronisering med SMARTi'):'Deling pauset lokalt';const duration=document.createElement('small');duration.textContent=`Lokal grense: ${b.max_duration_seconds/60} minutter`;const diagnostic=document.createElement('small');diagnostic.textContent=b.measurement_status||'Venter på første måling.';const reading=document.createElement('small');reading.textContent=b.last_observed_at?`${b.last_power_w} W · målt ${new Date(b.last_observed_at).toLocaleString('nb-NO')}`:'';const edit=document.createElement('button');edit.className='quiet';edit.textContent='Rediger';edit.onclick=()=>start(b);const raw=document.createElement('small');raw.textContent=b.sensor_state!==undefined?`Home Assistant: ${b.sensor_state} ${b.sensor_unit||''} · ${b.sensor_observed_at?new Date(b.sensor_observed_at).toLocaleString('nb-NO'):'ukjent tidspunkt'}`:'';copy.append(name,status,duration,diagnostic,reading,raw);const actions=document.createElement('div');actions.className='binding-actions';actions.append(edit);const button=document.createElement('button');button.className='quiet';button.textContent=b.local_enabled?'Pause deling':'Gjenoppta deling';button.onclick=()=>action(async()=>{await request('bindings/'+b.local_id+'/participation','POST',{enabled:!b.local_enabled});await refresh();});actions.append(button);row.append(copy,actions);$('#bindings').append(row);}
+  for(const b of bindings){
+    const row=document.createElement('div');row.className='binding';
+    const copy=document.createElement('div');
+    const name=document.createElement('strong');name.textContent=b.name;
+    const status=document.createElement('small');status.textContent=b.local_enabled?(b.device_id?'Koblet til SMARTi · deler målinger':'Venter på synkronisering med SMARTi'):'Deling pauset lokalt';
+    const duration=document.createElement('small');duration.textContent=`Din tidsgrense: ${b.max_duration_seconds/60} minutter`;
+    const diagnostic=document.createElement('small');diagnostic.textContent=b.measurement_status||'Venter på første måling.';
+    const reading=document.createElement('small');reading.textContent=b.last_observed_at?`${b.last_power_w} W · målt ${new Date(b.last_observed_at).toLocaleString('nb-NO')}`:'';
+    const raw=document.createElement('small');raw.textContent=b.sensor_state!==undefined?`Home Assistant: ${b.sensor_state} ${b.sensor_unit||''} · ${b.sensor_observed_at?new Date(b.sensor_observed_at).toLocaleString('nb-NO'):'ukjent tidspunkt'}`:'';
+    copy.append(name,status,duration,diagnostic,reading,raw);
+    const control=(snapshot.controls||[]).find(c=>c.local_id===b.local_id);
+    const controlStatus=document.createElement('small');controlStatus.className='control-status';
+    controlStatus.textContent=control?.error || (control?`Av/på-test pågår · senest tilbake ${new Date(control.expires_at).toLocaleTimeString('nb-NO')}`:b.physical_control_enabled?(snapshot.physical_control_enabled?'Av/på-test tillatt lokalt. SMARTi kan starte en test.':'Av/på-test tillatt lokalt. Venter på åpning hos SMARTi.'):'Fysisk styring er av.');
+    if(control?.error)controlStatus.classList.add('control-fault');
+    copy.append(controlStatus);
+    const actions=document.createElement('div');actions.className='binding-actions';
+    const edit=document.createElement('button');edit.className='quiet';edit.textContent='Rediger';edit.onclick=()=>start(b);
+    const button=document.createElement('button');button.className='quiet';button.textContent=b.local_enabled?'Pause deling':'Gjenoppta deling';
+    button.onclick=()=>action(async()=>{await request('bindings/'+b.local_id+'/participation','POST',{enabled:!b.local_enabled});await refresh();});
+    actions.append(edit,button);
+    if(b.entity_id?.startsWith('switch.')){
+      const permit=document.createElement('button');permit.className='quiet';
+      permit.textContent=b.physical_control_enabled?'Stopp styring':'Tillat av/på-test';
+      permit.dataset.unavailable=String(!b.physical_control_enabled&&(!b.local_enabled||b.needs_sync||!b.device_id));
+      permit.onclick=()=>{
+        if(!b.physical_control_enabled&&!confirm(`Tillat at SMARTi slår av ${b.name} i opptil ${b.max_duration_seconds/60} minutter per test?\n\nVelg bare utstyr som tåler å slås av og på. Appen forsøker å slå det på igjen ved testslutt eller mistet forbindelse. Dette krever at appen og Home Assistant kjører. Du kan stoppe testen her når som helst.`))return;
+        void action(async()=>{await request('bindings/'+b.local_id+'/control','POST',{enabled:!b.physical_control_enabled});await refresh();message(b.physical_control_enabled?'Testtilgang er slått av. Kontroller status for eventuell gjenoppretting.':'Av/på-test er tillatt for denne bryteren. SMARTi må også åpne for styring.');});
+      };
+      actions.append(permit);
+    }
+    row.append(copy,actions);$('#bindings').append(row);
+  }
 }
 async function refresh(){
   snapshot=await request('status');$('#loading').hidden=true;$('#setup').hidden=snapshot.paired;$('#connected').hidden=!snapshot.paired;
   $('#connection').textContent=snapshot.connection==='ONLINE'?'● Tilkoblet SMARTi · oppdatert '+new Date(snapshot.last_sync).toLocaleTimeString('nb-NO'):'Venter på kontakt med SMARTi';
-  $('#server-address').textContent=snapshot.cloud_url||'';renderBindings();if(snapshot.error)message(snapshot.error,true);controls();
+  $('#server-address').textContent=snapshot.cloud_url||'';renderBindings();const fault=(snapshot.controls||[]).find(c=>c.error);if(fault)message(fault.error,true);else if(snapshot.error)message(snapshot.error,true);controls();
 }
 $('#add').onclick=()=>start();$('#cancel').onclick=close;$('#back').onclick=()=>showStep(step-1);
 $('#device-search').oninput=drawChoices;$('#sensor-search').oninput=drawChoices;$('#confirm').onchange=controls;
