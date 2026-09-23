@@ -21,7 +21,7 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.8.2"
+VERSION = "0.8.3"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -291,7 +291,7 @@ def restore_done(journal, command_id):
     save_control(journal)
 
 
-async def restore_pending(*, force=False, local_id=None):
+async def restore_pending(*, force=False, local_id=None, preserve_active=False):
     """Independent of cloud retries, pairing, and the main synchronization lock."""
     async with control_lock:
         journal = load_control()
@@ -303,6 +303,13 @@ async def restore_pending(*, force=False, local_id=None):
 
         async def restore_one(command_id, item):
             binding = bindings.get(item["local_id"], {})
+            # A planned process restart must not terminate a confirmed lease.
+            # Keep the durable original state; expiry is still absolute.
+            if (preserve_active and item["state"] == "ACTIVE" and item.get("hold_off")
+                    and utcnow() < parse_time(item["expires_at"])
+                    and locally_permitted(binding, journal)
+                    and binding.get("entity_id") == item["entity_id"]):
+                return
             try:
                 entity = await ha_entity(item["entity_id"])
                 prior = item.get("prior_state", {"state": "on", "attributes": {}})
@@ -595,8 +602,24 @@ async def worker():
 
 @asynccontextmanager
 async def lifespan(_):
-    # A restart cancels all old leases even if their end time is in the future.
-    await restore_pending(force=True)
+    # Reconcile durable commands with the server BEFORE the restoration
+    # watchdog sees the empty in-memory lease after a process restart.
+    while True:
+        try:
+            await _synchronize()
+            break
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+            logger.warning("Waiting for restart reconciliation (%s)", type(error).__name__)
+            # HA/Core or the server can still be starting. Do not fabricate a
+            # cancellation from that outage. Expired commands are restored.
+            await restore_pending(force=True, preserve_active=True)
+            active = any(c.get("state") == "ACTIVE" and c.get("hold_off")
+                         and utcnow() < parse_time(c["expires_at"])
+                         for c in load_control()["commands"].values())
+            if not active:
+                break
+            await asyncio.sleep(2)
+    await restore_pending()
     task = asyncio.create_task(worker())
     watchdog = asyncio.create_task(restore_watchdog())
     try:
@@ -605,8 +628,8 @@ async def lifespan(_):
         task.cancel()
         watchdog.cancel()
         await asyncio.gather(task, watchdog, return_exceptions=True)
+        await restore_pending(force=True, preserve_active=True)
         runtime.update(cloud_control_enabled=False, active_dispatch_ids=[])
-        await restore_pending(force=True)
 
 
 app = FastAPI(title="SMARTi Flex Home Assistant App", lifespan=lifespan)

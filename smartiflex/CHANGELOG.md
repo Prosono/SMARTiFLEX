@@ -1,5 +1,13 @@
 # Endringslogg
 
+## 0.8.3
+
+- Bevarer aktive utkoblinger og opprinnelig enhetstilstand ved oppdatering og omstart.
+- Bekrefter aktive kommandoer med serveren før tilbakeføringskontrollen starter.
+- Venter ved oppstart dersom HA eller serveren starter, uten å forlenge leveringsperioden.
+- Utløpte eller tilbakekalte aktiveringer tilbakeføres.
+- Overgangen fra eldre versjoner kan fortsatt tilbakeføre ved avslutning av gammel app. Ingen programvare kan håndheve av-modus mens HA er utilgjengelig.
+
 ## 0.8.2
 
 - Endre styreentitet og effektsensor fra enhetsvinduet.
