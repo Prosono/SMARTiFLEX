@@ -21,7 +21,7 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -43,10 +43,10 @@ def load_state():
     if not STATE_PATH.exists():
         return {"bindings": [], "processed": {}}
     state = json.loads(STATE_PATH.read_text())
-    if not state.get("portal_managed"):
+    if state.get("portal_managed") != 2:
         for binding in state.get("bindings", []):
-            binding.update(local_enabled=True, physical_control_enabled=binding.get("entity_id", "").startswith("switch."), portal_managed=True)
-        state["portal_managed"] = True
+            binding.update(local_enabled=not binding.get("pending_remove"), physical_control_enabled=not binding.get("pending_remove") and binding.get("entity_id", "").startswith(("switch.", "climate.")), portal_managed=True)
+        state["portal_managed"] = 2
         save_state(state)
     return state
 
@@ -104,12 +104,12 @@ def cloud_control_current():
 
 def locally_permitted(binding, journal):
     return bool(binding.get("physical_control_enabled") is True and binding.get("local_enabled") and not binding.get("needs_sync")
-        and binding.get("local_id") not in blocked_local_ids and binding.get("entity_id", "").startswith("switch.")
+        and binding.get("local_id") not in blocked_local_ids and binding.get("entity_id", "").startswith(("switch.", "climate."))
         and not any(c["state"] == "RESTORE_FAILED" for c in journal["commands"].values()))
 
 
 def control_ready(binding, entity, journal):
-    return bool(locally_permitted(binding, journal) and entity and entity.get("state") == "on"
+    return bool(locally_permitted(binding, journal) and entity and (entity.get("state") == "on" if binding.get("entity_id", "").startswith("switch.") else entity.get("state") not in (None, "off", "unknown", "unavailable") and "off" in entity.get("attributes", {}).get("hvac_modes", []))
         and not any(c["state"] not in ("RESTORED", "REJECTED") and (c.get("local_id") == binding.get("local_id") or c.get("entity_id") == binding.get("entity_id")) for c in journal["commands"].values()))
 
 
@@ -172,7 +172,7 @@ def evaluate_command(command, binding, consent, *, physical_enabled=False):
         return {"status": "SIMULATED"}
     if (command.get("command") == "REDUCE_LOAD" and command.get("simulation") is False
         and physical_enabled is True and binding.get("physical_control_enabled") is True and binding.get("local_id") not in blocked_local_ids
-        and binding.get("entity_id", "").startswith("switch.")):
+        and binding.get("entity_id", "").startswith(("switch.", "climate."))):
         return {"status": "READY"}
     return {"status": "REJECTED", "error": "Physical control is not permitted for this device"}
 
@@ -188,8 +188,8 @@ async def ha_states():
 
 
 async def ha_entity(entity_id):
-    if not entity_id.startswith("switch.") or any(c in entity_id for c in ("/", "?", "#")):
-        raise ValueError("Only local switch entities are supported")
+    if not entity_id.startswith(("switch.", "climate.")) or any(c in entity_id for c in ("/", "?", "#")):
+        raise ValueError("Only local switch and climate entities are supported")
     token = os.getenv("SUPERVISOR_TOKEN")
     if not token:
         raise ValueError("Supervisor access is not available")
@@ -216,8 +216,63 @@ async def ha_switch(entity_id, service):
         return next((e for e in states if e.get("entity_id") == entity_id), None) if isinstance(states, list) else None
 
 
+CLIMATE_SETTINGS = {"temperature": ("set_temperature", "temperature"),
+    "target_temp_low": ("set_temperature", "target_temp_low"), "target_temp_high": ("set_temperature", "target_temp_high"),
+    "preset_mode": ("set_preset_mode", "preset_mode"), "fan_mode": ("set_fan_mode", "fan_mode"),
+    "swing_mode": ("set_swing_mode", "swing_mode"), "swing_horizontal_mode": ("set_swing_horizontal_mode", "swing_horizontal_mode"),
+    "humidity": ("set_humidity", "humidity")}
+
+
+def prior_state(entity):
+    return {"state": entity["state"], "attributes": {k: v for k, v in entity.get("attributes", {}).items()
+        if k in CLIMATE_SETTINGS and v is not None}} if entity["entity_id"].startswith("climate.") else {"state": entity["state"], "attributes": {}}
+
+
+def matches_prior(entity, prior):
+    return entity.get("state") == prior["state"] and all(entity.get("attributes", {}).get(k) == v for k, v in prior.get("attributes", {}).items())
+
+
+async def ha_climate(entity_id, service, data):
+    if not entity_id.startswith("climate.") or service not in {"set_hvac_mode", *(v[0] for v in CLIMATE_SETTINGS.values())}:
+        raise ValueError("Unsupported climate service")
+    token = os.getenv("SUPERVISOR_TOKEN")
+    if not token:
+        raise ValueError("Supervisor access is not available")
+    async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
+        response = await client.post("http://supervisor/core/api/services/climate/" + service,
+            headers={"Authorization": f"Bearer {token}"}, json={"entity_id": entity_id, **data})
+        response.raise_for_status()
+        states = response.json()
+        return next((e for e in states if e.get("entity_id") == entity_id), None) if isinstance(states, list) else None
+
+
+async def turn_off(entity_id):
+    return await ha_climate(entity_id, "set_hvac_mode", {"hvac_mode": "off"}) if entity_id.startswith("climate.") else await ha_switch(entity_id, "turn_off")
+
+
+async def restore_state(item, entity, journal, command_id):
+    if not item["entity_id"].startswith("climate."):
+        await ha_switch(item["entity_id"], "turn_on")
+        return
+    prior = item["prior_state"]
+    grouped = {}
+    for key, value in prior["attributes"].items():
+        if entity.get("attributes", {}).get(key) != value:
+            service, field = CLIMATE_SETTINGS[key]
+            grouped.setdefault(service, {})[field] = value
+    for service, data in grouped.items():
+        changed = await ha_climate(item["entity_id"], service, data)
+        if changed and changed.get("state") == "off":
+            item["off_signature"] = state_signature(changed)
+            save_control(journal)
+    await ha_climate(item["entity_id"], "set_hvac_mode", {"hvac_mode": prior["state"]})
+
+
 def state_signature(entity):
-    return {"changed": entity.get("last_changed"), "context": entity.get("context", {}).get("id")}
+    result = {"changed": entity.get("last_changed"), "context": entity.get("context", {}).get("id")}
+    if entity.get("entity_id", "").startswith("climate."):
+        result["settings"] = {k: v for k, v in entity.get("attributes", {}).items() if k in CLIMATE_SETTINGS}
+    return result
 
 
 def restore_failed(journal, command_id, message):
@@ -250,12 +305,13 @@ async def restore_pending(*, force=False, local_id=None):
             binding = bindings.get(item["local_id"], {})
             try:
                 entity = await ha_entity(item["entity_id"])
-                if entity.get("state") == "on":
+                prior = item.get("prior_state", {"state": "on", "attributes": {}})
+                if matches_prior(entity, prior):
                     # The user/another automation may have already restored it.
                     restore_done(journal, command_id)
                     return
                 if entity.get("state") != "off":
-                    restore_failed(journal, command_id, "Bryteren er utilgjengelig. Kontroller den i Home Assistant.")
+                    restore_failed(journal, command_id, "Enheten er utilgjengelig. Kontroller den i Home Assistant.")
                     return
                 # A network read may itself have crossed the deadline or pause.
                 due = (force or item["state"] in ("PREPARED", "RESTORE_FAILED") or utcnow() >= parse_time(item["expires_at"])
@@ -267,16 +323,16 @@ async def restore_pending(*, force=False, local_id=None):
                 signature = item.get("off_signature")
                 if (signature and signature != state_signature(entity)) or (not signature and entity.get("context", {}).get("user_id")):
                     # Do not undo a newer manual/automation change to the switch.
-                    restore_failed(journal, command_id, "Bryteren ble endret etter styringen. Slå den på manuelt for å avslutte testen.")
+                    restore_failed(journal, command_id, "Enheten ble endret etter styringen. Slå den på manuelt for å avslutte testen.")
                     return
-                await ha_switch(item["entity_id"], "turn_on")
+                await restore_state(item, entity, journal, command_id)
                 after = await ha_entity(item["entity_id"])
-                if after.get("state") != "on":
-                    restore_failed(journal, command_id, "Bryteren bekreftet ikke på. Kontroller den i Home Assistant.")
+                if not matches_prior(after, prior):
+                    restore_failed(journal, command_id, "Enheten bekreftet ikke på. Kontroller den i Home Assistant.")
                     return
                 restore_done(journal, command_id)
             except (httpx.HTTPError, ValueError, TypeError, KeyError):
-                restore_failed(journal, command_id, "Kunne ikke gjenopprette bryteren. Prøver igjen; kontroller Home Assistant.")
+                restore_failed(journal, command_id, "Kunne ikke gjenopprette enheten. Prøver igjen; kontroller Home Assistant.")
 
         # Independent switches must not wait in line behind an unavailable HA
         # entity. Journal updates are synchronous under the one journal lock;
@@ -300,10 +356,12 @@ async def execute_physical(command, binding, consent):
         if decision["status"] == "READY":
             try:
                 entity = await ha_entity(binding["entity_id"])
-                if not control_ready(binding, entity, journal):
-                    decision = {"status": "REJECTED", "error": "Bryteren må være på og uten uavklart tidligere styring"}
+                already_off = entity.get("state") == "off" and locally_permitted(binding, journal) and not any(
+                    c["state"] not in ("RESTORED", "REJECTED") and c.get("entity_id") == binding["entity_id"] for c in journal["commands"].values())
+                if not control_ready(binding, entity, journal) and not already_off:
+                    decision = {"status": "REJECTED", "error": "Enheten må være på og uten uavklart tidligere styring"}
             except (httpx.HTTPError, ValueError, TypeError):
-                decision = {"status": "REJECTED", "error": "Bryteren kunne ikke kontrolleres i Home Assistant"}
+                decision = {"status": "REJECTED", "error": "Enheten kunne ikke kontrolleres i Home Assistant"}
             if decision["status"] == "READY":
                 # Network reads may have crossed expiry or a local pause.
                 decision = evaluate_command(command, binding, consent, physical_enabled=cloud_control_current())
@@ -317,11 +375,16 @@ async def execute_physical(command, binding, consent):
         # This independent journal is fsynced before the external effect. It is
         # retained on disconnect/edit and the watchdog restores after restart.
         item = {"state": "PREPARED", "installation_id": load_state().get("installation_id"), "entity_id": binding["entity_id"], "local_id": binding["local_id"],
-            "device_id": command["device_id"], "expires_at": command["expires_at"], "prepared_at": utcnow().isoformat()}
+            "device_id": command["device_id"], "expires_at": command["expires_at"], "prepared_at": utcnow().isoformat(), "prior_state": prior_state(entity)}
         journal["commands"][command_id] = item
         save_control(journal)
         try:
-            changed = await ha_switch(binding["entity_id"], "turn_off")
+            if entity.get("state") == "off":
+                item["state"] = "ACTIVE"
+                queue_control_result(journal, command_id, "EXECUTED", physical_execution=False, already_off=True, observed_at=utcnow().isoformat())
+                save_control(journal)
+                return
+            changed = await turn_off(binding["entity_id"])
             # Capture action-owned identity before a verification read, so a
             # subsequent manual change cannot become our restoration target.
             if changed and changed.get("state") == "off":
@@ -339,7 +402,7 @@ async def execute_physical(command, binding, consent):
         except (httpx.HTTPError, ValueError, TypeError):
             # A timeout may have happened after HA applied turn_off. Never retry
             # the reduction; retain PREPARED and let restoration resolve it.
-            queue_control_result(journal, command_id, "FAILED", "Bryteren bekreftet ikke styringen. Gjenoppretting pågår.", physical_execution=False)
+            queue_control_result(journal, command_id, "FAILED", "Enheten bekreftet ikke styringen. Gjenoppretting pågår.", physical_execution=False)
             save_control(journal)
 
 
@@ -654,7 +717,7 @@ async def bind(body: BindingRequest):
             raise HTTPException(409, "Koble til SMARTi først")
         if any(b["entity_id"] == body.entity_id or b["power_entity"] == body.power_entity for b in state["bindings"]):
             raise HTTPException(409, "Enheten eller effektsensoren er allerede valgt")
-        state["bindings"].append({**body.model_dump(), "local_id": str(uuid4()), "device_id": None, "kind": body.kind or "GENERIC_LOAD", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True, "physical_control_enabled": domain == "switch", "portal_managed": True})
+        state["bindings"].append({**body.model_dump(), "local_id": str(uuid4()), "device_id": None, "kind": body.kind or "GENERIC_LOAD", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True, "physical_control_enabled": domain in ("switch", "climate"), "portal_managed": True})
         save_state(state)
         return {"ok": True}
 
@@ -683,7 +746,7 @@ async def remove_binding(local_id: str):
         if not binding:
             raise HTTPException(404)
         if any(c.get("local_id") == local_id and c["state"] not in ("RESTORED", "REJECTED") for c in load_control()["commands"].values()):
-            raise HTTPException(409, "Styringen må gjenopprettes før enheten kan fjernes. Kontroller bryteren i Home Assistant.")
+            raise HTTPException(409, "Styringen må gjenopprettes før enheten kan fjernes. Kontroller enheten i Home Assistant.")
         binding.update(pending_remove=True, local_enabled=False, physical_control_enabled=False)
         save_state(state)
     return {"ok": True, "pending": True}

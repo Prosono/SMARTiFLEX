@@ -1,3 +1,9 @@
+## Versjon 0.8.0 – termostater og NODES-styring
+
+Brytere og climate-enheter med off-modus kan styres. Før utkobling lagres modus og relevante temperatur-, preset-, vifte- og swinginnstillinger i en varig journal. Modusen settes til off. Ved slutt, mistet styringsforbindelse eller omstart forsøkes tidligere tilstand gjenopprettet og kontrolleres i HA. Manuelle endringer overstyres ikke; feil vises og beholdes i journalen. Enheter som allerede er av blir ikke slått på ved slutt.
+
+Nye manuelt opprettede NODES-handler kan klargjøres automatisk for eksplisitt valgte testporteføljer. Serveren må være oppdatert og markedsstyring aktivert. Kundenes portalvalg gjelder fortsatt. En bekreftet kommando er ikke i seg selv verifisert markedsleveranse.
+
 ## Versjon 0.7.0 – styr valgene i SMARTi Flex
 
 HA-appen brukes til å legge til og fjerne enheter. Nye enheter deler målinger og er tilgjengelige for støttet styring. Måledeling, styring/test og tidsgrenser administreres i SMARTi Flex-portalen. Eksisterende valg i portalen beholdes ved oppdatering; gamle lokale av/på-valg erstattes av portalstyring.

@@ -112,7 +112,7 @@ function renderBindings(){
     copy.append(name,category,status,duration,diagnostic,reading,raw);
     const control=(snapshot.controls||[]).find(c=>c.local_id===b.local_id);
     const controlStatus=document.createElement('small');controlStatus.className='control-status';
-    controlStatus.textContent=control?.error || (control?`Styring pågår · tilbake senest ${new Date(control.expires_at).toLocaleTimeString('nb-NO')}`:b.entity_id?.startsWith('switch.')?'Bryteren kan styres når det er tillatt i SMARTi Flex.':'Styring av denne enhetstypen støttes ikke ennå. Målinger deles.');
+    controlStatus.textContent=control?.error || (control?`Styring pågår · tilbake senest ${new Date(control.expires_at).toLocaleTimeString('nb-NO')}`:['switch','climate'].includes(b.entity_id?.split('.')[0])?'Styring følger tillatelsene i SMARTi Flex. Tidligere tilstand gjenopprettes ved slutt.':'Styring av denne enhetstypen støttes ikke ennå. Målinger deles.');
     if(control?.error)controlStatus.classList.add('control-fault');
     copy.append(controlStatus);
     const actions=document.createElement('div');actions.className='binding-actions';
