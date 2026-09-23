@@ -21,7 +21,7 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -105,7 +105,7 @@ def cloud_control_current():
 def locally_permitted(binding, journal):
     return bool(binding.get("physical_control_enabled") is True and binding.get("local_enabled") and not binding.get("needs_sync")
         and binding.get("local_id") not in blocked_local_ids and binding.get("entity_id", "").startswith(("switch.", "climate."))
-        and not any(c["state"] == "RESTORE_FAILED" for c in journal["commands"].values()))
+        and not any(c["state"] == "RESTORE_FAILED" and (c.get("local_id") == binding.get("local_id") or c.get("entity_id") == binding.get("entity_id")) for c in journal["commands"].values()))
 
 
 def control_ready(binding, entity, journal):
@@ -306,6 +306,31 @@ async def restore_pending(*, force=False, local_id=None):
             try:
                 entity = await ha_entity(item["entity_id"])
                 prior = item.get("prior_state", {"state": "on", "attributes": {}})
+                # Hold the saved original state until the live lease ends. A
+                # manual ON is not a completed restoration during an activation.
+                holding = (not force and item["state"] == "ACTIVE" and item.get("hold_off")
+                    and utcnow() < parse_time(item["expires_at"]) and cloud_control_current()
+                    and command_id in runtime.get("active_dispatch_ids", [])
+                    and locally_permitted(binding, journal) and binding.get("entity_id") == item["entity_id"])
+                if holding:
+                    if entity.get("state") in (None, "unknown", "unavailable"):
+                        item["local_error"] = "Kan ikke bekrefte avslått tilstand. Prøver igjen."
+                        save_control(journal)
+                        return
+                    if entity.get("state") != "off":
+                        item["reassert_attempt_at"] = utcnow().isoformat()
+                        save_control(journal)
+                        await turn_off(item["entity_id"])
+                        entity = await ha_entity(item["entity_id"])
+                        item["reassert_count"] = item.get("reassert_count", 0) + 1
+                        logger.info("Reasserted off for active command %s", command_id)
+                    if entity.get("state") != "off":
+                        item["local_error"] = "Enheten bekreftet ikke avslått tilstand. Prøver igjen."
+                    else:
+                        item["off_signature"] = state_signature(entity)
+                        item.pop("local_error", None)
+                    save_control(journal)
+                    return
                 if matches_prior(entity, prior):
                     # The user/another automation may have already restored it.
                     restore_done(journal, command_id)
@@ -375,7 +400,7 @@ async def execute_physical(command, binding, consent):
         # This independent journal is fsynced before the external effect. It is
         # retained on disconnect/edit and the watchdog restores after restart.
         item = {"state": "PREPARED", "installation_id": load_state().get("installation_id"), "entity_id": binding["entity_id"], "local_id": binding["local_id"],
-            "device_id": command["device_id"], "expires_at": command["expires_at"], "prepared_at": utcnow().isoformat(), "prior_state": prior_state(entity)}
+            "device_id": command["device_id"], "expires_at": command["expires_at"], "prepared_at": utcnow().isoformat(), "prior_state": prior_state(entity), "hold_off": True}
         journal["commands"][command_id] = item
         save_control(journal)
         try:
@@ -393,9 +418,9 @@ async def execute_physical(command, binding, consent):
             after = await ha_entity(binding["entity_id"])
             if after.get("state") != "off":
                 raise ValueError("Switch did not confirm off")
-            if item.get("off_signature") and item["off_signature"] != state_signature(after):
-                raise ValueError("Switch changed during execution")
-            item.setdefault("off_signature", state_signature(after))
+            # HA integrations may update context/attributes asynchronously while
+            # remaining off. The confirmed off state is our restoration identity.
+            item["off_signature"] = state_signature(after)
             item["state"] = "ACTIVE"
             queue_control_result(journal, command_id, "EXECUTED", physical_execution=True, observed_at=utcnow().isoformat())
             save_control(journal)

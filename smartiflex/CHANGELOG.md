@@ -1,5 +1,13 @@
 # Endringslogg
 
+## 0.8.1
+
+- Holder enheten avslått under en aktiv styringsperiode; manuell påslåing slås av igjen ved neste lokale kontroll (normalt hvert andre sekund).
+- Beholder opprinnelig tilstand for tilbakeføring ved periodeslutt eller stopp av styring.
+- En tilbakeføringsfeil på én enhet trekker ikke tilbake tillatelsen for andre enheter.
+- Godtar asynkrone HA-oppdateringer mens termostaten bekrefter avslått tilstand.
+- Krever at appen kjører og har kontakt med HA og gyldig styringstillatelse. Dette er programvarestyring, ikke en fysisk sperre.
+
 ## 0.5.0
 
 - Lokal tillatelse for av/på-pilot per bryter. Fysisk styring er av som standard og krever separat åpning på SMARTi-serveren.
