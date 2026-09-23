@@ -21,7 +21,7 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -42,7 +42,13 @@ def parse_time(value):
 def load_state():
     if not STATE_PATH.exists():
         return {"bindings": [], "processed": {}}
-    return json.loads(STATE_PATH.read_text())
+    state = json.loads(STATE_PATH.read_text())
+    if not state.get("portal_managed"):
+        for binding in state.get("bindings", []):
+            binding.update(local_enabled=True, physical_control_enabled=binding.get("entity_id", "").startswith("switch."), portal_managed=True)
+        state["portal_managed"] = True
+        save_state(state)
+    return state
 
 
 def atomic_json(path, state):
@@ -158,7 +164,7 @@ def evaluate_command(command, binding, consent, *, physical_enabled=False):
         return {"status": "REJECTED", "error": "Consent changed or is unavailable"}
     try:
         end, start = parse_time(command["expires_at"]), parse_time(command["period_from"])
-        if end <= utcnow() or start > utcnow() or not 0 < (end-start).total_seconds() <= min(3600, binding["max_duration_seconds"], consent["constraints"]["max_duration_seconds"]):
+        if end <= utcnow() or start > utcnow() or not 0 < (end-start).total_seconds() <= (consent["constraints"]["max_duration_seconds"] if binding.get("portal_managed") else min(binding["max_duration_seconds"], consent["constraints"]["max_duration_seconds"])):
             return {"status": "REJECTED", "error": "Command timing exceeds local constraints"}
     except (KeyError, ValueError, TypeError, AttributeError):
         return {"status": "REJECTED", "error": "Invalid command timing"}
@@ -388,8 +394,15 @@ async def _synchronize():
             consents = await heartbeat()
             await restore_pending()
             await flush_control_results(client)
-            for binding in state["bindings"]:
+            for binding in list(state["bindings"]):
                 try:
+                    if binding.get("pending_remove"):
+                        if binding.get("device_id"):
+                            response = await client.post(f"/api/agent/devices/{binding['device_id']}/disconnect")
+                            response.raise_for_status()
+                        state["bindings"].remove(binding)
+                        save_state(state)
+                        continue
                     if not binding.get("device_id"):
                         response = await client.post("/api/agent/devices", json={k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w")})
                         response.raise_for_status()
@@ -401,6 +414,12 @@ async def _synchronize():
                         binding["needs_sync"] = False
                         consents.pop(binding["device_id"], None)
                         save_state(state)
+                    permission = consents.get(binding.get("device_id"))
+                    if permission and permission.get("constraints", {}).get("measurements_enabled") is False:
+                        binding["measurement_status"] = "Måledeling er pauset i SMARTi Flex."
+                        binding["portal_measurements_paused"] = True
+                        continue
+                    binding["portal_measurements_paused"] = False
                     if not binding.get("local_enabled"):
                         binding["measurement_status"] = "Deling er pauset lokalt."
                         continue
@@ -635,7 +654,7 @@ async def bind(body: BindingRequest):
             raise HTTPException(409, "Koble til SMARTi først")
         if any(b["entity_id"] == body.entity_id or b["power_entity"] == body.power_entity for b in state["bindings"]):
             raise HTTPException(409, "Enheten eller effektsensoren er allerede valgt")
-        state["bindings"].append({**body.model_dump(), "local_id": str(uuid4()), "device_id": None, "kind": body.kind or "GENERIC_LOAD", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True, "physical_control_enabled": False})
+        state["bindings"].append({**body.model_dump(), "local_id": str(uuid4()), "device_id": None, "kind": body.kind or "GENERIC_LOAD", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True, "physical_control_enabled": domain == "switch", "portal_managed": True})
         save_state(state)
         return {"ok": True}
 
@@ -646,47 +665,28 @@ class ParticipationRequest(BaseModel):
 
 @app.post("/bindings/{local_id}/participation")
 async def participation(local_id: str, body: ParticipationRequest):
-    if not body.enabled:
-        blocked_local_ids.add(local_id)
-        await restore_pending(force=True, local_id=local_id)
-    async with state_lock:
-        state = load_state()
-        binding = next((b for b in state["bindings"] if b["local_id"] == local_id), None)
-        if not binding:
-            raise HTTPException(404)
-        binding["local_enabled"] = body.enabled
-        if not body.enabled:
-            binding["physical_control_enabled"] = False
-        save_state(state)
-    if not body.enabled:
-        await restore_pending(force=True, local_id=local_id)
-    return {"ok": True}
+    raise HTTPException(409, "Administrer måledeling og styring i SMARTi Flex-portalen.")
 
 
 @app.post("/bindings/{local_id}/control")
 async def local_control(local_id: str, body: ParticipationRequest):
-    if not body.enabled:
-        blocked_local_ids.add(local_id)
-        await restore_pending(force=True, local_id=local_id)
+    raise HTTPException(409, "Administrer måledeling og styring i SMARTi Flex-portalen.")
+
+
+@app.post("/bindings/{local_id}/remove")
+async def remove_binding(local_id: str):
+    blocked_local_ids.add(local_id)
+    await restore_pending(force=True, local_id=local_id)
     async with state_lock:
         state = load_state()
         binding = next((b for b in state["bindings"] if b["local_id"] == local_id), None)
         if not binding:
             raise HTTPException(404)
-        if body.enabled:
-            if not state.get("token") or not binding.get("local_enabled") or binding.get("needs_sync"):
-                raise HTTPException(409, "Koble til, gjenoppta deling og vent på synkronisering først")
-            if not binding.get("entity_id", "").startswith("switch."):
-                raise HTTPException(422, "Pilotstyring støtter bare brytere")
-            if any(c["state"] == "RESTORE_FAILED" or (c.get("local_id") == local_id and c["state"] not in ("RESTORED", "REJECTED")) for c in load_control()["commands"].values()):
-                raise HTTPException(409, "Avslutt eller gjenopprett den pågående styringen først")
-        binding["physical_control_enabled"] = body.enabled
-        if body.enabled:
-            blocked_local_ids.discard(local_id)
+        if any(c.get("local_id") == local_id and c["state"] not in ("RESTORED", "REJECTED") for c in load_control()["commands"].values()):
+            raise HTTPException(409, "Styringen må gjenopprettes før enheten kan fjernes. Kontroller bryteren i Home Assistant.")
+        binding.update(pending_remove=True, local_enabled=False, physical_control_enabled=False)
         save_state(state)
-    if not body.enabled:
-        await restore_pending(force=True, local_id=local_id)
-    return {"ok": True}
+    return {"ok": True, "pending": True}
 
 
 @app.post("/bindings/{local_id}/edit")

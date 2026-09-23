@@ -55,7 +55,7 @@ async function start(binding=null){
     try{
       entities=await request('entities');editing=binding;device=null;sensor=null;$('#reporting-mode').value=binding?.reporting_mode||'on_change';
       $('#device-kind').value=binding&&deviceKinds[binding.kind]?binding.kind:'';
-      $('#device-search').value='';$('#sensor-search').value='';$('#confirm').checked=false;
+      $('#device-search').value='';$('#sensor-search').value='';$('#confirm').checked=true;
       $('#wizard').hidden=false;
       if(binding){
         device=entities.find(e=>e.entity_id===binding.entity_id)||null;
@@ -103,8 +103,8 @@ function renderBindings(){
     const row=document.createElement('div');row.className='binding';
     const copy=document.createElement('div');
     const name=document.createElement('strong');name.textContent=b.name;
-    const status=document.createElement('small');status.textContent=b.local_enabled?(b.device_id?'Koblet til SMARTi · deler målinger':'Venter på synkronisering med SMARTi'):'Deling pauset lokalt';
-    const duration=document.createElement('small');duration.textContent=`Din tidsgrense: ${b.max_duration_seconds/60} minutter`;
+    const status=document.createElement('small');status.textContent=b.pending_remove?'Fjerning venter på synkronisering':b.portal_measurements_paused?'Måledeling pauset i SMARTi Flex':b.local_enabled?(b.device_id?'Koblet til SMARTi · deler målinger':'Venter på synkronisering med SMARTi'):'Deling pauset lokalt';
+    const duration=document.createElement('small');duration.textContent='Måledeling, styring og tidsgrenser administreres i SMARTi Flex-portalen.';
     const diagnostic=document.createElement('small');diagnostic.textContent=b.measurement_status||'Venter på første måling.';
     const reading=document.createElement('small');reading.textContent=b.last_observed_at?`${b.last_power_w} W · målt ${new Date(b.last_observed_at).toLocaleString('nb-NO')}`:'';
     const raw=document.createElement('small');raw.textContent=b.sensor_state!==undefined?`Home Assistant: ${b.sensor_state} ${b.sensor_unit||''} · ${b.sensor_observed_at?new Date(b.sensor_observed_at).toLocaleString('nb-NO'):'ukjent tidspunkt'}`:'';
@@ -112,24 +112,13 @@ function renderBindings(){
     copy.append(name,category,status,duration,diagnostic,reading,raw);
     const control=(snapshot.controls||[]).find(c=>c.local_id===b.local_id);
     const controlStatus=document.createElement('small');controlStatus.className='control-status';
-    controlStatus.textContent=control?.error || (control?`Av/på-test pågår · senest tilbake ${new Date(control.expires_at).toLocaleTimeString('nb-NO')}`:b.physical_control_enabled?(snapshot.physical_control_enabled?'Av/på-test tillatt lokalt. SMARTi kan starte en test.':'Av/på-test tillatt lokalt. Venter på åpning hos SMARTi.'):'Fysisk styring er av.');
+    controlStatus.textContent=control?.error || (control?`Styring pågår · tilbake senest ${new Date(control.expires_at).toLocaleTimeString('nb-NO')}`:b.entity_id?.startsWith('switch.')?'Bryteren kan styres når det er tillatt i SMARTi Flex.':'Styring av denne enhetstypen støttes ikke ennå. Målinger deles.');
     if(control?.error)controlStatus.classList.add('control-fault');
     copy.append(controlStatus);
     const actions=document.createElement('div');actions.className='binding-actions';
-    const edit=document.createElement('button');edit.className='quiet';edit.textContent='Rediger';edit.onclick=()=>{hideDevice();void start(b);};
-    const button=document.createElement('button');button.className='quiet';button.textContent=b.local_enabled?'Pause deling':'Gjenoppta deling';
-    button.onclick=()=>action(async()=>{await request('bindings/'+b.local_id+'/participation','POST',{enabled:!b.local_enabled});await refresh();});
-    actions.append(edit,button);
-    if(b.entity_id?.startsWith('switch.')){
-      const permit=document.createElement('button');permit.className='quiet';
-      permit.textContent=b.physical_control_enabled?'Stopp styring':'Tillat av/på-test';
-      permit.dataset.unavailable=String(!b.physical_control_enabled&&(!b.local_enabled||b.needs_sync||!b.device_id));
-      permit.onclick=()=>{
-        if(!b.physical_control_enabled&&!confirm(`Tillat at SMARTi slår av ${b.name} i opptil ${b.max_duration_seconds/60} minutter per test?\n\nVelg bare utstyr som tåler å slås av og på. Appen forsøker å slå det på igjen ved testslutt eller mistet forbindelse. Dette krever at appen og Home Assistant kjører. Du kan stoppe testen her når som helst.`))return;
-        void action(async()=>{await request('bindings/'+b.local_id+'/control','POST',{enabled:!b.physical_control_enabled});await refresh();message(b.physical_control_enabled?'Testtilgang er slått av. Kontroller status for eventuell gjenoppretting.':'Av/på-test er tillatt for denne bryteren. SMARTi må også åpne for styring.');});
-      };
-      actions.append(permit);
-    }
+    const remove=document.createElement('button');remove.className='quiet';remove.textContent=b.pending_remove?'Fjerning venter på forbindelse':'Fjern enhet';remove.dataset.unavailable=String(!!b.pending_remove);
+    remove.onclick=()=>{if(confirm(`Fjerne ${b.name} fra SMARTi Flex-appen? Måledeling og styring stoppes. Enheten i Home Assistant og tidligere historikk beholdes.`))void action(async()=>{await request('bindings/'+b.local_id+'/remove','POST');await refresh();message('Enheten er stoppet lokalt. Frakoblingen synkroniseres med SMARTi Flex.');});};
+    actions.append(remove);
     row.append(copy,actions);
     const tile=document.createElement('button');tile.className='device-tile';tile.dataset.id=b.local_id;tile.setAttribute('aria-haspopup','dialog');tile.setAttribute('aria-label',b.name+' – åpne innstillinger');
     const top=document.createElement('span');top.className='device-tile-top';const arrow=document.createElement('span');arrow.textContent='↗';arrow.setAttribute('aria-hidden','true');top.append(deviceIcon(b.kind),arrow);
@@ -137,8 +126,8 @@ function renderBindings(){
     const title=document.createElement('strong');title.className='device-tile-name';title.textContent=b.name;
     const state=document.createElement('span');state.className='device-tile-status';
     const recentUpload=b.last_upload_at && Date.now()-Date.parse(b.last_upload_at)<120000;
-    state.textContent=control?.error?'● Styring trenger oppfølging':control?'● Av/på-test pågår':!b.local_enabled?'● Deling pauset':!b.device_id||b.needs_sync?'● Venter på synkronisering':snapshot.connection!=='ONLINE'?'● Venter på forbindelse':recentUpload?'● Deler målinger':'● Sjekk målestatus';
-    if(recentUpload&&b.local_enabled&&snapshot.connection==='ONLINE'&&!control&&!b.needs_sync)state.classList.add('active');
+    state.textContent=b.pending_remove?'● Fjernes':b.portal_measurements_paused?'● Måledeling pauset':control?.error?'● Styring trenger oppfølging':control?'● Av/på-test pågår':!b.local_enabled?'● Deling pauset':!b.device_id||b.needs_sync?'● Venter på synkronisering':snapshot.connection!=='ONLINE'?'● Venter på forbindelse':recentUpload?'● Deler målinger':'● Sjekk målestatus';
+    if(!b.portal_measurements_paused&&!b.pending_remove&&recentUpload&&b.local_enabled&&snapshot.connection==='ONLINE'&&!control&&!b.needs_sync)state.classList.add('active');
     const bottom=document.createElement('span');bottom.className='device-tile-bottom';
     const power=document.createElement('span');const label=document.createElement('small');label.textContent='Siste kjente effekt';const value=document.createElement('strong');value.textContent=typeof b.last_power_w==='number'&&Number.isFinite(b.last_power_w)?(b.last_power_w/1000).toLocaleString('nb-NO',{maximumFractionDigits:3})+' kW':'–';power.append(label,value);
     const hint=document.createElement('span');hint.className='device-tile-hint';hint.textContent='Innstillinger';bottom.append(power,hint);tile.append(top,kind,title,state,bottom);
@@ -164,7 +153,7 @@ $('#next').onclick=()=>{
   if(step<3){if(step===2&&!editing){$('#device-name').value=device.name;$('#power').value=String(Math.min(1000000,Math.max(0,sensor.power_w||0)));$('#power-help').textContent=sensor.power_w>0?'Forhåndsutfylt fra den ferske effektmålingen. Juster hvis du kjenner enhetens kapasitet.':'Ingen positiv, fersk effektmåling. Anslaget er satt til 0 til du kjenner kapasiteten.';}showStep(step+1);return;}
   const name=$('#device-name'),power=$('#power');if(!name.reportValidity()||!$('#device-kind').reportValidity()||!power.reportValidity())return;
   if(!name.value.trim()){message('Gi enheten et navn.',true);name.focus();return;}
-  void action(async()=>{await request(editing?'bindings/'+editing.local_id+'/edit':'bindings','POST',{entity_id:device.entity_id,power_entity:sensor.entity_id,name:name.value.trim(),kind:$('#device-kind').value,estimated_w:Number(power.value)||0,reporting_mode:$('#reporting-mode').value,max_duration_seconds:Number($('#duration').value)});close();await refresh();message(`${name.value.trim()} er ${editing?'oppdatert':'lagt til'}. Aktiver kommunikasjonstest i SMARTi-portalen når endringen er synkronisert.`);});
+  void action(async()=>{await request(editing?'bindings/'+editing.local_id+'/edit':'bindings','POST',{entity_id:device.entity_id,power_entity:sensor.entity_id,name:name.value.trim(),kind:$('#device-kind').value,estimated_w:Number(power.value)||0,reporting_mode:$('#reporting-mode').value,max_duration_seconds:Number($('#duration').value)});close();await refresh();message(`${name.value.trim()} er ${editing?'oppdatert':'lagt til'}. Administrer måledeling og styring i SMARTi Flex-portalen.`);});
 };
 $('#pair').onsubmit=e=>{e.preventDefault();const form=e.currentTarget;void action(async()=>{await request('pair','POST',Object.fromEntries(new FormData(form)));form.reset();await refresh();message('Du er koblet til. Legg til den første enheten din.');});};
 $('#disconnect').onclick=()=>{if(confirm('Fjerne tilkoblingen og de lokale enhetskoblingene? Trekk også tilbake tilgangen i SMARTi-portalen.'))void action(async()=>{await request('disconnect','POST');close();await refresh();});};
