@@ -1,3 +1,4 @@
+const deviceKinds = {"HEAT_PUMP": "Varmepumpe", "EV_CHARGER": "Elbillader", "OVEN": "Panelovn / elektrisk ovn", "WATER_HEATER": "Varmtvannsbereder", "UNDERFLOOR_HEATING": "Varmekabler / gulvvarme", "BATTERY": "Batteri", "HVAC": "Ventilasjon / kjøling", "SAUNA": "Badstue", "GENERIC_LOAD": "Annen styrbar last"};
 const $ = s => document.querySelector(s);
 const csrf = $('meta[name="csrf-token"]').content;
 let snapshot = null, entities = [], step = 1, device = null, sensor = null, pending = false, editing = null;
@@ -52,6 +53,7 @@ async function start(binding=null){
     $('#add').textContent='Henter enheter …';
     try{
       entities=await request('entities');editing=binding;device=null;sensor=null;$('#reporting-mode').value=binding?.reporting_mode||'on_change';
+      $('#device-kind').value=binding&&deviceKinds[binding.kind]?binding.kind:'';
       $('#device-search').value='';$('#sensor-search').value='';$('#confirm').checked=false;
       $('#wizard').hidden=false;
       if(binding){
@@ -84,7 +86,8 @@ function renderBindings(){
     const diagnostic=document.createElement('small');diagnostic.textContent=b.measurement_status||'Venter på første måling.';
     const reading=document.createElement('small');reading.textContent=b.last_observed_at?`${b.last_power_w} W · målt ${new Date(b.last_observed_at).toLocaleString('nb-NO')}`:'';
     const raw=document.createElement('small');raw.textContent=b.sensor_state!==undefined?`Home Assistant: ${b.sensor_state} ${b.sensor_unit||''} · ${b.sensor_observed_at?new Date(b.sensor_observed_at).toLocaleString('nb-NO'):'ukjent tidspunkt'}`:'';
-    copy.append(name,status,duration,diagnostic,reading,raw);
+    const category=document.createElement('small');category.textContent=deviceKinds[b.kind]||'Velg enhetstype under Rediger';
+    copy.append(name,category,status,duration,diagnostic,reading,raw);
     const control=(snapshot.controls||[]).find(c=>c.local_id===b.local_id);
     const controlStatus=document.createElement('small');controlStatus.className='control-status';
     controlStatus.textContent=control?.error || (control?`Av/på-test pågår · senest tilbake ${new Date(control.expires_at).toLocaleTimeString('nb-NO')}`:b.physical_control_enabled?(snapshot.physical_control_enabled?'Av/på-test tillatt lokalt. SMARTi kan starte en test.':'Av/på-test tillatt lokalt. Venter på åpning hos SMARTi.'):'Fysisk styring er av.');
@@ -117,9 +120,9 @@ $('#add').onclick=()=>start();$('#cancel').onclick=close;$('#back').onclick=()=>
 $('#device-search').oninput=drawChoices;$('#sensor-search').oninput=drawChoices;$('#confirm').onchange=controls;
 $('#next').onclick=()=>{
   if(step<3){if(step===2&&!editing){$('#device-name').value=device.name;$('#power').value=String(Math.min(1000000,Math.max(0,sensor.power_w||0)));$('#power-help').textContent=sensor.power_w>0?'Forhåndsutfylt fra den ferske effektmålingen. Juster hvis du kjenner enhetens kapasitet.':'Ingen positiv, fersk effektmåling. Anslaget er satt til 0 til du kjenner kapasiteten.';}showStep(step+1);return;}
-  const name=$('#device-name'),power=$('#power');if(!name.reportValidity()||!power.reportValidity())return;
+  const name=$('#device-name'),power=$('#power');if(!name.reportValidity()||!$('#device-kind').reportValidity()||!power.reportValidity())return;
   if(!name.value.trim()){message('Gi enheten et navn.',true);name.focus();return;}
-  void action(async()=>{await request(editing?'bindings/'+editing.local_id+'/edit':'bindings','POST',{entity_id:device.entity_id,power_entity:sensor.entity_id,name:name.value.trim(),estimated_w:Number(power.value)||0,reporting_mode:$('#reporting-mode').value,max_duration_seconds:Number($('#duration').value)});close();await refresh();message(`${name.value.trim()} er ${editing?'oppdatert':'lagt til'}. Aktiver kommunikasjonstest i SMARTi-portalen når endringen er synkronisert.`);});
+  void action(async()=>{await request(editing?'bindings/'+editing.local_id+'/edit':'bindings','POST',{entity_id:device.entity_id,power_entity:sensor.entity_id,name:name.value.trim(),kind:$('#device-kind').value,estimated_w:Number(power.value)||0,reporting_mode:$('#reporting-mode').value,max_duration_seconds:Number($('#duration').value)});close();await refresh();message(`${name.value.trim()} er ${editing?'oppdatert':'lagt til'}. Aktiver kommunikasjonstest i SMARTi-portalen når endringen er synkronisert.`);});
 };
 $('#pair').onsubmit=e=>{e.preventDefault();const form=e.currentTarget;void action(async()=>{await request('pair','POST',Object.fromEntries(new FormData(form)));form.reset();await refresh();message('Du er koblet til. Legg til den første enheten din.');});};
 $('#disconnect').onclick=()=>{if(confirm('Fjerne tilkoblingen og de lokale enhetskoblingene? Trekk også tilbake tilgangen i SMARTi-portalen.'))void action(async()=>{await request('disconnect','POST');close();await refresh();});};

@@ -21,7 +21,7 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -610,6 +610,7 @@ async def entities():
 
 
 class BindingRequest(BaseModel):
+    kind: Literal["HEAT_PUMP", "EV_CHARGER", "OVEN", "WATER_HEATER", "UNDERFLOOR_HEATING", "BATTERY", "HVAC", "SAUNA", "GENERIC_LOAD"] | None = None
     reporting_mode: Literal["periodic", "on_change"] = "on_change"
     entity_id: str = Field(max_length=200)
     power_entity: str = Field(max_length=200)
@@ -634,7 +635,7 @@ async def bind(body: BindingRequest):
             raise HTTPException(409, "Koble til SMARTi først")
         if any(b["entity_id"] == body.entity_id or b["power_entity"] == body.power_entity for b in state["bindings"]):
             raise HTTPException(409, "Enheten eller effektsensoren er allerede valgt")
-        state["bindings"].append({**body.model_dump(), "local_id": str(uuid4()), "device_id": None, "kind": "THERMOSTAT" if domain == "climate" else "GENERIC_LOAD" if domain == "number" else "SWITCH", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True, "physical_control_enabled": False})
+        state["bindings"].append({**body.model_dump(), "local_id": str(uuid4()), "device_id": None, "kind": body.kind or "GENERIC_LOAD", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True, "physical_control_enabled": False})
         save_state(state)
         return {"ok": True}
 
@@ -706,9 +707,9 @@ async def edit_binding(local_id: str, body: BindingRequest):
             raise HTTPException(404)
         if any(b["local_id"] != local_id and (b["entity_id"] == body.entity_id or b["power_entity"] == body.power_entity) for b in state["bindings"]):
             raise HTTPException(409, "Enheten eller målingen brukes allerede av en annen enhet")
-        binding.update(body.model_dump())
+        binding.update(body.model_dump(exclude_none=True))
         binding["physical_control_enabled"] = False
-        binding.update(revision=str(uuid4()), needs_sync=True, kind="THERMOSTAT" if domain == "climate" else "GENERIC_LOAD" if domain == "number" else "SWITCH", capabilities={"switch": ["TURN_ON", "TURN_OFF"], "climate": ["SET_TEMPERATURE"], "number": []}[domain] + ["READ_POWER"], measurement_status="Endringen venter på synkronisering med SMARTi.")
+        binding.update(revision=str(uuid4()), needs_sync=True, kind=body.kind or binding.get("kind", "GENERIC_LOAD"), capabilities={"switch": ["TURN_ON", "TURN_OFF"], "climate": ["SET_TEMPERATURE"], "number": []}[domain] + ["READ_POWER"], measurement_status="Endringen venter på synkronisering med SMARTi.")
         for key in ("last_observed_at", "last_power_w", "last_upload_at"):
             binding.pop(key, None)
         save_state(state)
