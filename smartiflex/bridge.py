@@ -21,7 +21,7 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.8.4"
+VERSION = "0.8.5"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -258,6 +258,24 @@ async def turn_off(entity_id):
     return await ha_climate(entity_id, "set_hvac_mode", {"hvac_mode": "off"}) if entity_id.startswith("climate.") else await ha_switch(entity_id, "turn_off")
 
 
+async def confirmed_state(entity_id, predicate, *, expires_at=None):
+    """A service response is acceptance, not synchronous device confirmation."""
+    try:
+        async with asyncio.timeout(8):
+            for attempt in range(25):
+                if expires_at and utcnow() >= parse_time(expires_at):
+                    raise ValueError("Activation expired while awaiting HA confirmation")
+                entity = await ha_entity(entity_id)
+                if expires_at and utcnow() >= parse_time(expires_at):
+                    raise ValueError("Activation expired while awaiting HA confirmation")
+                if predicate(entity):
+                    return entity
+                await asyncio.sleep(0.25)
+    except TimeoutError:
+        pass
+    raise ValueError("HA state was not confirmed within the verification window")
+
+
 async def restore_state(item, entity, journal, command_id):
     if not item["entity_id"].startswith("climate."):
         await ha_switch(item["entity_id"], "turn_on")
@@ -366,7 +384,7 @@ async def restore_pending(*, force=False, local_id=None, preserve_active=False):
                     restore_failed(journal, command_id, "Enheten ble endret etter styringen. Slå den på manuelt for å avslutte testen.")
                     return
                 await restore_state(item, entity, journal, command_id)
-                after = await ha_entity(item["entity_id"])
+                after = await confirmed_state(item["entity_id"], lambda value: matches_prior(value, prior))
                 if not matches_prior(after, prior):
                     restore_failed(journal, command_id, "Enheten bekreftet ikke på. Kontroller den i Home Assistant.")
                     return
@@ -430,7 +448,7 @@ async def execute_physical(command, binding, consent):
             if changed and changed.get("state") == "off":
                 item["off_signature"] = state_signature(changed)
                 save_control(journal)
-            after = await ha_entity(binding["entity_id"])
+            after = await confirmed_state(binding["entity_id"], lambda value: value.get("state") == "off", expires_at=command["expires_at"])
             if after.get("state") != "off":
                 raise ValueError("Switch did not confirm off")
             # HA integrations may update context/attributes asynchronously while
@@ -588,8 +606,10 @@ async def synchronize():
     try:
         await _synchronize()
     except Exception:
-        runtime.update(cloud_control_enabled=False, active_dispatch_ids=[], control_lease_at=None)
-        await restore_pending(force=True)
+        # A telemetry/result upload failure is not a server cancellation. Keep
+        # the last confirmed lease until its existing freshness deadline. The
+        # independent watchdog still restores on expiry or explicit revocation.
+        await restore_pending()
         raise
 
 

@@ -1,5 +1,12 @@
 # Endringslogg
 
+## 0.8.5
+
+- Venter på faktisk HA-status etter servicekall, med begrenset bekreftelsestid og kontroll av aktiveringens sluttid.
+- En enkelt synkroniseringsfeil avslutter ikke lenger en fortsatt gyldig styringstillatelse.
+- Stopp, utløpt periode og utløpt serverkontakt tilbakefører fortsatt enheten.
+- Regresjonstester dekker forsinket bryter-/termostatstatus og midlertidig synkroniseringsfeil. Fysisk ende-til-ende-test gjenstår.
+
 ## 0.8.4
 
 - Retter lokal styringssperre som ble stående etter entitetsredigering.
