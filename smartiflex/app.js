@@ -1,11 +1,12 @@
 const deviceKinds = {"HEAT_PUMP": "Varmepumpe", "EV_CHARGER": "Elbillader", "OVEN": "Panelovn / elektrisk ovn", "WATER_HEATER": "Varmtvannsbereder", "UNDERFLOOR_HEATING": "Varmekabler / gulvvarme", "BATTERY": "Batteri", "HVAC": "Ventilasjon / kjøling", "SAUNA": "Badstue", "GENERIC_LOAD": "Annen styrbar last"};
 const $ = s => document.querySelector(s);
 const csrf = $('meta[name="csrf-token"]').content;
+let openedDevice = null;
 let snapshot = null, entities = [], step = 1, device = null, sensor = null, pending = false, editing = null;
 const names = {switch:'Bryter', climate:'Termostat', number:'Tallstyring'};
 const words = value => new Set(value.toLocaleLowerCase('nb-NO').replace(/[_.-]/g,' ').split(/\s+/).filter(w => w.length > 2 && !['sensor','switch','climate','number','power','effekt'].includes(w)));
 function score(a,b) { const tokens=words(a.name+' '+a.entity_id); return [...words(b.name+' '+b.entity_id)].filter(w=>tokens.has(w)).length; }
-function message(text, error=false) { const el=$(error?'#error':'#notice'); el.textContent=text; el.hidden=!text; }
+function message(text, error=false) { const el=$(error?'#error':'#notice'); el.textContent=text; el.hidden=!text; if ($('#device-dialog').open) { const feedback=$('#dialog-feedback'); feedback.textContent=text; feedback.hidden=!text; feedback.className=error?'feedback-error':''; } }
 async function request(path,method='GET',body) {
   const r=await fetch('./'+path,{method,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:body===undefined?undefined:JSON.stringify(body)});
   const data=await r.json().catch(()=>null);
@@ -72,11 +73,32 @@ async function start(binding=null){
   });
 }
 function close(){ $('#wizard').hidden=true;$('#add').focus(); }
+const iconPaths = {
+  HEAT_PUMP:'M12 12c-6-1-7-6-3-8 4-2 5 4 3 8Zm0 0c4-5 9-3 8 1-1 4-6 3-8-1Zm0 0c2 6-2 9-5 6-3-3 1-7 5-6Z',
+  EV_CHARGER:'M4 15V9l2-4h12l2 4v6M4 10h16M6 15v3M18 15v3M7 13h1M16 13h1M13 7l-2 4h3l-2 4',
+  WATER_HEATER:'M12 3s-7 8-7 12a7 7 0 0 0 14 0c0-4-7-12-7-12Z',
+  OVEN:'M4 5h16v15H4ZM7 8h10M8 11v6M12 11v6M16 11v6',
+  UNDERFLOOR_HEATING:'M3 7c3-4 3 4 6 0s3 4 6 0 3 4 6 0M3 12c3-4 3 4 6 0s3 4 6 0 3 4 6 0M3 17c3-4 3 4 6 0s3 4 6 0 3 4 6 0',
+  BATTERY:'M3 7h16v10H3ZM22 10v4M11 9l-2 3h4l-2 3',
+  HVAC:'M3 8h12a3 3 0 1 0-3-3M3 12h16a3 3 0 1 1-3 3M3 16h5',
+  SAUNA:'M5 20h14M7 16c-5-5 5-5 0-11M12 16c-5-5 5-5 0-11M17 16c-5-5 5-5 0-11',
+  GENERIC_LOAD:'M8 3v5M16 3v5M6 8h12v3a6 6 0 0 1-12 0ZM12 17v4'
+};
+function deviceIcon(kind){
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  for(const [key,value] of Object.entries({viewBox:'0 0 24 24',width:'28',height:'28',fill:'none',stroke:'currentColor','stroke-width':'1.6','stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'}))svg.setAttribute(key,value);
+  const path=document.createElementNS(svg.namespaceURI,'path');path.setAttribute('d',iconPaths[kind]||iconPaths.GENERIC_LOAD);svg.append(path);return svg;
+}
+function hideDevice(){ $('#device-dialog').close(); }
+$('#dialog-close').onclick=hideDevice;
+$('#device-dialog').addEventListener('close',()=>{const id=openedDevice;openedDevice=null;[...document.querySelectorAll('.device-tile')].find(el=>el.dataset.id===id)?.focus();});
 function renderBindings(){
+  const focusedTile=document.activeElement?.classList.contains('device-tile')?document.activeElement.dataset.id:null;
   const bindings=snapshot.bindings;
   $('#count').textContent=`${bindings.length} ${bindings.length===1?'enhet':'enheter'}`;
   $('#bindings').replaceChildren();
   if(!bindings.length){const p=document.createElement('p');p.className='empty';p.textContent='Ingen enheter lagt til ennå. Start med én du kjenner godt.';$('#bindings').append(p);}
+  if(openedDevice&&!bindings.some(b=>b.local_id===openedDevice))hideDevice();
   for(const b of bindings){
     const row=document.createElement('div');row.className='binding';
     const copy=document.createElement('div');
@@ -94,7 +116,7 @@ function renderBindings(){
     if(control?.error)controlStatus.classList.add('control-fault');
     copy.append(controlStatus);
     const actions=document.createElement('div');actions.className='binding-actions';
-    const edit=document.createElement('button');edit.className='quiet';edit.textContent='Rediger';edit.onclick=()=>start(b);
+    const edit=document.createElement('button');edit.className='quiet';edit.textContent='Rediger';edit.onclick=()=>{hideDevice();void start(b);};
     const button=document.createElement('button');button.className='quiet';button.textContent=b.local_enabled?'Pause deling':'Gjenoppta deling';
     button.onclick=()=>action(async()=>{await request('bindings/'+b.local_id+'/participation','POST',{enabled:!b.local_enabled});await refresh();});
     actions.append(edit,button);
@@ -108,7 +130,27 @@ function renderBindings(){
       };
       actions.append(permit);
     }
-    row.append(copy,actions);$('#bindings').append(row);
+    row.append(copy,actions);
+    const tile=document.createElement('button');tile.className='device-tile';tile.dataset.id=b.local_id;tile.setAttribute('aria-haspopup','dialog');tile.setAttribute('aria-label',b.name+' – åpne innstillinger');
+    const top=document.createElement('span');top.className='device-tile-top';const arrow=document.createElement('span');arrow.textContent='↗';arrow.setAttribute('aria-hidden','true');top.append(deviceIcon(b.kind),arrow);
+    const kind=document.createElement('span');kind.className='device-tile-kind';kind.textContent=deviceKinds[b.kind]||'Enhet';
+    const title=document.createElement('strong');title.className='device-tile-name';title.textContent=b.name;
+    const state=document.createElement('span');state.className='device-tile-status';
+    const recentUpload=b.last_upload_at && Date.now()-Date.parse(b.last_upload_at)<120000;
+    state.textContent=control?.error?'● Styring trenger oppfølging':control?'● Av/på-test pågår':!b.local_enabled?'● Deling pauset':!b.device_id||b.needs_sync?'● Venter på synkronisering':snapshot.connection!=='ONLINE'?'● Venter på forbindelse':recentUpload?'● Deler målinger':'● Sjekk målestatus';
+    if(recentUpload&&b.local_enabled&&snapshot.connection==='ONLINE'&&!control&&!b.needs_sync)state.classList.add('active');
+    const bottom=document.createElement('span');bottom.className='device-tile-bottom';
+    const power=document.createElement('span');const label=document.createElement('small');label.textContent='Siste kjente effekt';const value=document.createElement('strong');value.textContent=typeof b.last_power_w==='number'&&Number.isFinite(b.last_power_w)?(b.last_power_w/1000).toLocaleString('nb-NO',{maximumFractionDigits:3})+' kW':'–';power.append(label,value);
+    const hint=document.createElement('span');hint.className='device-tile-hint';hint.textContent='Innstillinger';bottom.append(power,hint);tile.append(top,kind,title,state,bottom);
+    tile.onclick=()=>{openedDevice=b.local_id;$('#dialog-feedback').hidden=true;$('#device-dialog-title').textContent=b.name;$('#device-details').replaceChildren(row);$('#device-dialog').showModal();};
+    $('#bindings').append(tile);
+    if(focusedTile===b.local_id)tile.focus();
+    if(openedDevice===b.local_id){
+      // Preserve keyboard focus across the periodic status refresh.
+      const buttons=[...$('#device-details').querySelectorAll('button')];const focused=buttons.indexOf(document.activeElement);
+      $('#device-dialog-title').textContent=b.name;$('#device-details').replaceChildren(row);
+      if(focused>=0)row.querySelectorAll('button')[focused]?.focus();
+    }
   }
 }
 async function refresh(){
