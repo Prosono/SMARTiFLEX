@@ -21,7 +21,7 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -472,7 +472,13 @@ async def _synchronize():
             async def heartbeat():
                 journal = load_control()
                 ready = [b["device_id"] for b in state["bindings"] if b.get("device_id") and locally_permitted(b, journal)]
-                reply = await client.post("/api/agent/heartbeat", json={"version": VERSION, "control_ready_device_ids": ready})
+                states = []
+                for b in state["bindings"]:
+                    entity = entities.get(b.get("entity_id"), {})
+                    b["ha_status"] = {"state": str(entity.get("state", "unavailable"))[:60], "action": str(entity.get("attributes", {}).get("hvac_action") or "")[:60], "checked_at": utcnow().isoformat()}
+                    if b.get("device_id"):
+                        states.append({"device_id": b["device_id"], "state": b["ha_status"]["state"], "action": b["ha_status"]["action"]})
+                reply = await client.post("/api/agent/heartbeat", json={"version": VERSION, "control_ready_device_ids": ready, "device_states": states})
                 reply.raise_for_status()
                 payload = reply.json()
                 active = payload.get("active_dispatch_ids")
@@ -795,6 +801,8 @@ async def edit_binding(local_id: str, body: BindingRequest):
             raise HTTPException(404)
         if any(b["local_id"] != local_id and (b["entity_id"] == body.entity_id or b["power_entity"] == body.power_entity) for b in state["bindings"]):
             raise HTTPException(409, "Enheten eller målingen brukes allerede av en annen enhet")
+        if any(c.get("local_id") == local_id and c["state"] not in ("RESTORED", "REJECTED") for c in load_control()["commands"].values()):
+            raise HTTPException(409, "Tidligere styring må tilbakeføres før du endrer entitet. Kontroller enheten i Home Assistant.")
         binding.update(body.model_dump(exclude_none=True))
         binding["physical_control_enabled"] = False
         binding.update(revision=str(uuid4()), needs_sync=True, kind=body.kind or binding.get("kind", "GENERIC_LOAD"), capabilities={"switch": ["TURN_ON", "TURN_OFF"], "climate": ["SET_TEMPERATURE"], "number": []}[domain] + ["READ_POWER"], measurement_status="Endringen venter på synkronisering med SMARTi.")

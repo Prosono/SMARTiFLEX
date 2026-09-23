@@ -1,5 +1,12 @@
 # Endringslogg
 
+## 0.8.2
+
+- Endre styreentitet og effektsensor fra enhetsvinduet.
+- Viser faktisk HA-status lokalt og i SMARTi Flex-portalen: på, av, varmer, kjøler og hviler.
+- Eldre status merkes sist kjent. Entitets-ID-er forblir lokale.
+- Entitetsbytte krever at tidligere styring er tilbakeført.
+
 ## 0.8.1
 
 - Holder enheten avslått under en aktiv styringsperiode; manuell påslåing slås av igjen ved neste lokale kontroll (normalt hvert andre sekund).

@@ -67,7 +67,7 @@ async function start(binding=null){
         $('#power-help').textContent='Ditt lagrede effektanslag. Du kan endre det her.';
       }else{$('#duration').value='900';}
       $('#edit-note').hidden=!binding;
-      drawChoices();showStep(binding&&device&&sensor?3:1);
+      drawChoices();showStep(1);
       $('#wizard').scrollIntoView({behavior:'instant',block:'start'});
     }finally{$('#add').textContent='Legg til enhet ＋';}
   });
@@ -109,7 +109,8 @@ function renderBindings(){
     const reading=document.createElement('small');reading.textContent=b.last_observed_at?`${b.last_power_w} W · målt ${new Date(b.last_observed_at).toLocaleString('nb-NO')}`:'';
     const raw=document.createElement('small');raw.textContent=b.sensor_state!==undefined?`Home Assistant: ${b.sensor_state} ${b.sensor_unit||''} · ${b.sensor_observed_at?new Date(b.sensor_observed_at).toLocaleString('nb-NO'):'ukjent tidspunkt'}`:'';
     const category=document.createElement('small');category.textContent=deviceKinds[b.kind]||'Velg enhetstype under Rediger';
-    copy.append(name,category,status,duration,diagnostic,reading,raw);
+    const actual=document.createElement('small');actual.textContent=haStatus(b.ha_status);
+    copy.append(name,category,status,actual,duration,diagnostic,reading,raw);
     const control=(snapshot.controls||[]).find(c=>c.local_id===b.local_id);
     const controlStatus=document.createElement('small');controlStatus.className='control-status';
     controlStatus.textContent=control?.error || (control?`Styring pågår · tilbake senest ${new Date(control.expires_at).toLocaleTimeString('nb-NO')}`:['switch','climate'].includes(b.entity_id?.split('.')[0])?'Styring følger tillatelsene i SMARTi Flex. Tidligere tilstand gjenopprettes ved slutt.':'Styring av denne enhetstypen støttes ikke ennå. Målinger deles.');
@@ -118,7 +119,9 @@ function renderBindings(){
     const actions=document.createElement('div');actions.className='binding-actions';
     const remove=document.createElement('button');remove.className='quiet';remove.textContent=b.pending_remove?'Fjerning venter på forbindelse':'Fjern enhet';remove.dataset.unavailable=String(!!b.pending_remove);
     remove.onclick=()=>{if(confirm(`Fjerne ${b.name} fra SMARTi Flex-appen? Måledeling og styring stoppes. Enheten i Home Assistant og tidligere historikk beholdes.`))void action(async()=>{await request('bindings/'+b.local_id+'/remove','POST');await refresh();message('Enheten er stoppet lokalt. Frakoblingen synkroniseres med SMARTi Flex.');});};
-    actions.append(remove);
+    const edit=document.createElement('button');edit.textContent='Endre enhet og effektsensor';
+    edit.onclick=()=>{hideDevice();void start(b);};
+    actions.append(edit,remove);
     row.append(copy,actions);
     const tile=document.createElement('button');tile.className='device-tile';tile.dataset.id=b.local_id;tile.setAttribute('aria-haspopup','dialog');tile.setAttribute('aria-label',b.name+' – åpne innstillinger');
     const top=document.createElement('span');top.className='device-tile-top';const arrow=document.createElement('span');arrow.textContent='↗';arrow.setAttribute('aria-hidden','true');top.append(deviceIcon(b.kind),arrow);
@@ -130,7 +133,7 @@ function renderBindings(){
     if(!b.portal_measurements_paused&&!b.pending_remove&&recentUpload&&b.local_enabled&&snapshot.connection==='ONLINE'&&!control&&!b.needs_sync)state.classList.add('active');
     const bottom=document.createElement('span');bottom.className='device-tile-bottom';
     const power=document.createElement('span');const label=document.createElement('small');label.textContent='Siste kjente effekt';const value=document.createElement('strong');value.textContent=typeof b.last_power_w==='number'&&Number.isFinite(b.last_power_w)?(b.last_power_w/1000).toLocaleString('nb-NO',{maximumFractionDigits:3})+' kW':'–';power.append(label,value);
-    const hint=document.createElement('span');hint.className='device-tile-hint';hint.textContent='Innstillinger';bottom.append(power,hint);tile.append(top,kind,title,state,bottom);
+    const hint=document.createElement('span');hint.className='device-tile-hint';hint.textContent='Innstillinger';bottom.append(power,hint);tile.append(top,kind,title,state,actual.cloneNode(true),bottom);
     tile.onclick=()=>{openedDevice=b.local_id;$('#dialog-feedback').hidden=true;$('#device-dialog-title').textContent=b.name;$('#device-details').replaceChildren(row);$('#device-dialog').showModal();};
     $('#bindings').append(tile);
     if(focusedTile===b.local_id)tile.focus();
@@ -159,3 +162,10 @@ $('#pair').onsubmit=e=>{e.preventDefault();const form=e.currentTarget;void actio
 $('#disconnect').onclick=()=>{if(confirm('Fjerne tilkoblingen og de lokale enhetskoblingene? Trekk også tilbake tilgangen i SMARTi-portalen.'))void action(async()=>{await request('disconnect','POST');close();await refresh();});};
 void refresh().catch(e=>{message(e.message,true);$('#loading').textContent='Kunne ikke hente status. Last siden på nytt.';});
 setInterval(()=>{if(!pending&&!document.hidden)void refresh().catch(()=>message('Kunne ikke oppdatere status. Kontroller forbindelsen.',true));},15000);
+
+function haStatus(status){
+  if(!status)return 'Enhetsstatus venter på Home Assistant';
+  const labels={on:'På',off:'Av',heat:'Varmemodus',cool:'Kjølemodus',heating:'Varmer',cooling:'Kjøler',idle:'Hviler',auto:'Automatisk',unavailable:'Utilgjengelig',unknown:'Ukjent'};
+  const value=status.state==='off'?'off':status.action||status.state;
+  return (Date.now()-Date.parse(status.checked_at)>90000?'Sist kjent: ':'Status: ')+(labels[value]||value);
+}
