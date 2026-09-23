@@ -1,7 +1,7 @@
 """Outbound Home Assistant bridge with an opt-in, locally bounded switch pilot."""
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -21,7 +21,7 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.8.5"
+VERSION = "0.8.6"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -278,7 +278,7 @@ async def confirmed_state(entity_id, predicate, *, expires_at=None):
 
 async def restore_state(item, entity, journal, command_id):
     if not item["entity_id"].startswith("climate."):
-        await ha_switch(item["entity_id"], "turn_on")
+        await ha_switch(item["entity_id"], "turn_off" if item.get("prior_state", {}).get("state") == "off" else "turn_on")
         return
     prior = item["prior_state"]
     grouped = {}
@@ -368,8 +368,8 @@ async def restore_pending(*, force=False, local_id=None, preserve_active=False):
                     # The user/another automation may have already restored it.
                     restore_done(journal, command_id)
                     return
-                if entity.get("state") != "off":
-                    restore_failed(journal, command_id, "Enheten er utilgjengelig. Kontroller den i Home Assistant.")
+                if entity.get("state") in (None, "unknown", "unavailable"):
+                    restore_failed(journal, command_id, "Enheten er utilgjengelig. Tilbakeføring forsøkes når den svarer igjen.")
                     return
                 # A network read may itself have crossed the deadline or pause.
                 due = (force or item["state"] in ("PREPARED", "RESTORE_FAILED") or utcnow() >= parse_time(item["expires_at"])
@@ -379,10 +379,20 @@ async def restore_pending(*, force=False, local_id=None, preserve_active=False):
                 if not due:
                     return
                 signature = item.get("off_signature")
-                if (signature and signature != state_signature(entity)) or (not signature and entity.get("context", {}).get("user_id")):
-                    # Do not undo a newer manual/automation change to the switch.
-                    restore_failed(journal, command_id, "Enheten ble endret etter styringen. Slå den på manuelt for å avslutte testen.")
+                if entity.get("context", {}).get("user_id") and (not signature or signature != state_signature(entity)):
+                    restore_failed(journal, command_id, "Manuell endring oppdaget. Kontroller ønsket tilstand i Home Assistant.")
                     return
+                # Integration context changes alone do not prove human input.
+                # Retry partial restoration too (e.g. mode restored, settings not).
+                if item.get("restore_next_attempt_at") and utcnow() < parse_time(item["restore_next_attempt_at"]):
+                    return
+                attempts = item.get("restore_attempts", 0) + 1
+                item["restore_attempts"] = attempts
+                item["restore_last_attempt_at"] = utcnow().isoformat()
+                delay = (2, 5, 10, 30, 60)[min(attempts - 1, 4)]
+                item["restore_next_attempt_at"] = (utcnow() + timedelta(seconds=delay)).isoformat()
+                save_control(journal)
+                logger.info("Restoration attempt %s for command %s", attempts, command_id)
                 await restore_state(item, entity, journal, command_id)
                 after = await confirmed_state(item["entity_id"], lambda value: matches_prior(value, prior))
                 if not matches_prior(after, prior):
@@ -704,7 +714,7 @@ async def status():
     async with state_lock:
         state = load_state()
         journal = load_control()
-        controls = [{"device_id": c.get("device_id"), "local_id": c.get("local_id"), "status": c["state"], "expires_at": c.get("expires_at"), "error": c.get("local_error")} for c in journal["commands"].values() if c["state"] not in ("RESTORED", "REJECTED")]
+        controls = [{"device_id": c.get("device_id"), "local_id": c.get("local_id"), "status": c["state"], "expires_at": c.get("expires_at"), "error": c.get("local_error"), "restore_attempts": c.get("restore_attempts", 0), "restore_next_attempt_at": c.get("restore_next_attempt_at")} for c in journal["commands"].values() if c["state"] not in ("RESTORED", "REJECTED")]
         return {**runtime, "version": VERSION, "paired": bool(state.get("token")), "cloud_url": state.get("cloud_url"), "bindings": state["bindings"], "physical_control_enabled": cloud_control_current(), "controls": controls, "pending_control_results": len(journal["outbox"])}
 
 

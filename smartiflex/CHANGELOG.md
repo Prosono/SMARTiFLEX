@@ -1,5 +1,13 @@
 # Endringslogg
 
+## 0.8.6
+
+- Varige tilbakeføringsforsøk med økende intervall opptil 60 sekunder.
+- HA-integrasjonens kontekstendring alene blokkerer ikke tilbakeføring.
+- Gjentar delvis tilbakeføring av modus og innstillinger; opprinnelig av-tilstand forblir av.
+- Viser antall tilbakeføringsforsøk og tidspunkt for neste kontroll.
+- Bevarer sperre ved nyere eksplisitt brukerendring. Fysisk verifikasjon gjenstår.
+
 ## 0.8.5
 
 - Venter på faktisk HA-status etter servicekall, med begrenset bekreftelsestid og kontroll av aktiveringens sluttid.

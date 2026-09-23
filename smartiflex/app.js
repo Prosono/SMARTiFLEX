@@ -114,7 +114,11 @@ function renderBindings(){
     const control=(snapshot.controls||[]).find(c=>c.local_id===b.local_id);
     const controlStatus=document.createElement('small');controlStatus.className='control-status';
     controlStatus.textContent=control?.error || (control?`Styring pågår · tilbake senest ${new Date(control.expires_at).toLocaleTimeString('nb-NO')}`:['switch','climate'].includes(b.entity_id?.split('.')[0])?'Styring følger tillatelsene i SMARTi Flex. Tidligere tilstand gjenopprettes ved slutt.':'Styring av denne enhetstypen støttes ikke ennå. Målinger deles.');
-    if(control?.error)controlStatus.classList.add('control-fault');
+    if(control?.error){
+      controlStatus.classList.add('control-fault');
+      if(control.restore_attempts)controlStatus.textContent+=` · ${control.restore_attempts} tilbakeføringsforsøk`;
+      if(control.restore_next_attempt_at)controlStatus.textContent+=` · neste kontroll ${new Date(control.restore_next_attempt_at).toLocaleTimeString('nb-NO')}`;
+    }
     copy.append(controlStatus);
     const actions=document.createElement('div');actions.className='binding-actions';
     const remove=document.createElement('button');remove.className='quiet';remove.textContent=b.pending_remove?'Fjerning venter på forbindelse':'Fjern enhet';remove.dataset.unavailable=String(!!b.pending_remove);
