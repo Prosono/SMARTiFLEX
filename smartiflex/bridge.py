@@ -21,7 +21,7 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.8.3"
+VERSION = "0.8.4"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -47,6 +47,14 @@ def load_state():
         for binding in state.get("bindings", []):
             binding.update(local_enabled=not binding.get("pending_remove"), physical_control_enabled=not binding.get("pending_remove") and binding.get("entity_id", "").startswith(("switch.", "climate.")), portal_managed=True)
         state["portal_managed"] = 2
+        save_state(state)
+    repaired = False
+    for binding in state.get("bindings", []):
+        if binding.get("revision") and not binding.get("edit_permission_repaired") and not binding.get("pending_remove"):
+            binding["physical_control_enabled"] = binding.get("entity_id", "").startswith(("switch.", "climate."))
+            binding["edit_permission_repaired"] = True
+            repaired = True
+    if repaired:
         save_state(state)
     return state
 
@@ -513,6 +521,7 @@ async def _synchronize():
                         response = await client.post(f"/api/agent/devices/{binding['device_id']}/configuration", json={**{k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w")}, "revision": binding["revision"]})
                         response.raise_for_status()
                         binding["needs_sync"] = False
+                        blocked_local_ids.discard(binding["local_id"])
                         consents.pop(binding["device_id"], None)
                         save_state(state)
                     permission = consents.get(binding.get("device_id"))
@@ -827,7 +836,8 @@ async def edit_binding(local_id: str, body: BindingRequest):
         if any(c.get("local_id") == local_id and c["state"] not in ("RESTORED", "REJECTED") for c in load_control()["commands"].values()):
             raise HTTPException(409, "Tidligere styring må tilbakeføres før du endrer entitet. Kontroller enheten i Home Assistant.")
         binding.update(body.model_dump(exclude_none=True))
-        binding["physical_control_enabled"] = False
+        binding["physical_control_enabled"] = domain in ("switch", "climate")
+        binding["edit_permission_repaired"] = True
         binding.update(revision=str(uuid4()), needs_sync=True, kind=body.kind or binding.get("kind", "GENERIC_LOAD"), capabilities={"switch": ["TURN_ON", "TURN_OFF"], "climate": ["SET_TEMPERATURE"], "number": []}[domain] + ["READ_POWER"], measurement_status="Endringen venter på synkronisering med SMARTi.")
         for key in ("last_observed_at", "last_power_w", "last_upload_at"):
             binding.pop(key, None)

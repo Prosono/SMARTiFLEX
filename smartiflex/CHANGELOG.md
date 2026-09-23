@@ -1,5 +1,10 @@
 # Endringslogg
 
+## 0.8.4
+
+- Retter lokal styringssperre som ble stående etter entitetsredigering.
+- Frigir redigeringssperren først etter vellykket konfigurasjonssynkronisering. Portalens samtykke gjelder fortsatt.
+
 ## 0.8.3
 
 - Bevarer aktive utkoblinger og opprinnelig enhetstilstand ved oppdatering og omstart.
