@@ -56,16 +56,16 @@ async function start(binding=null){
       entities=await request('entities');editing=binding;device=null;sensor=null;$('#reporting-mode').value=binding?.reporting_mode||'on_change';
       $('#device-kind').value=binding&&deviceKinds[binding.kind]?binding.kind:'';
       $('#device-search').value='';$('#sensor-search').value='';$('#confirm').checked=true;
-      $('#wizard').hidden=false;
+      $('#wizard').hidden=false;$('#control-consent').checked=false;
       if(binding){
         device=entities.find(e=>e.entity_id===binding.entity_id)||null;
         sensor=entities.find(e=>e.entity_id===binding.power_entity)||null;
-        $('#device-name').value=binding.name;$('#power').value=binding.estimated_w;
+        $('#control-consent').checked=!!binding.control_consent;$('#device-name').value=binding.name;$('#power').value=binding.estimated_w;
         const duration=$('#duration');
         if(![...duration.options].some(o=>Number(o.value)===binding.max_duration_seconds))duration.add(new Option(`${binding.max_duration_seconds/60} minutter`,String(binding.max_duration_seconds)));
         duration.value=String(binding.max_duration_seconds);
         $('#power-help').textContent='Ditt lagrede effektanslag. Du kan endre det her.';
-      }else{$('#duration').value='900';}
+      }else{$('#duration').value='3600';}
       $('#edit-note').hidden=!binding;
       drawChoices();showStep(1);
       $('#wizard').scrollIntoView({behavior:'instant',block:'start'});
@@ -104,7 +104,7 @@ function renderBindings(){
     const copy=document.createElement('div');
     const name=document.createElement('strong');name.textContent=b.name;
     const status=document.createElement('small');status.textContent=b.pending_remove?'Fjerning venter på synkronisering':b.portal_measurements_paused?'Måledeling pauset i SMARTi Flex':b.local_enabled?(b.device_id?'Koblet til SMARTi · deler målinger':'Venter på synkronisering med SMARTi'):'Deling pauset lokalt';
-    const duration=document.createElement('small');duration.textContent='Måledeling, styring og tidsgrenser administreres i SMARTi Flex-portalen.';
+    const duration=document.createElement('small');duration.textContent=`Maksimal utkobling: ${b.max_duration_seconds/60} minutter. Samtykket er felles med SMARTi Flex.`;
     const diagnostic=document.createElement('small');diagnostic.textContent=b.measurement_status||'Venter på første måling.';
     const reading=document.createElement('small');reading.textContent=b.last_observed_at?`${b.last_power_w} W · målt ${new Date(b.last_observed_at).toLocaleString('nb-NO')}`:'';
     const raw=document.createElement('small');raw.textContent=b.sensor_state!==undefined?`Home Assistant: ${b.sensor_state} ${b.sensor_unit||''} · ${b.sensor_observed_at?new Date(b.sensor_observed_at).toLocaleString('nb-NO'):'ukjent tidspunkt'}`:'';
@@ -125,16 +125,19 @@ function renderBindings(){
     remove.onclick=()=>{if(confirm(`Fjerne ${b.name} fra SMARTi Flex-appen? Måledeling og styring stoppes. Enheten i Home Assistant og tidligere historikk beholdes.`))void action(async()=>{await request('bindings/'+b.local_id+'/remove','POST');await refresh();message('Enheten er stoppet lokalt. Frakoblingen synkroniseres med SMARTi Flex.');});};
     const edit=document.createElement('button');edit.textContent='Endre enhet og effektsensor';
     edit.onclick=()=>{hideDevice();void start(b);};
-    actions.append(edit,remove);
+    const permissionButton=document.createElement('button');permissionButton.className='quiet';
+    permissionButton.textContent=b.control_consent?'Trekk tilbake styringstillatelse':'Gi tillatelse til styring';
+    permissionButton.disabled=!b.device_id||!!b.pending_remove;
+    permissionButton.onclick=()=>void action(async()=>{await request('bindings/'+b.local_id+'/control','POST',{enabled:!b.control_consent});await refresh();message('Tillatelsen er lagret. Synkroniseringsstatus vises på enheten.');});
+    actions.append(permissionButton,edit,remove);
     row.append(copy,actions);
-    const tile=document.createElement('button');tile.className='device-tile';tile.dataset.id=b.local_id;tile.setAttribute('aria-haspopup','dialog');tile.setAttribute('aria-label',b.name+' – åpne innstillinger');
+    const tile=document.createElement('button');tile.className='device-tile control-ring';const shared=controlState(b);tile.dataset.control=shared.color;tile.dataset.id=b.local_id;tile.setAttribute('aria-haspopup','dialog');tile.setAttribute('aria-label',b.name+' – åpne innstillinger');
     const top=document.createElement('span');top.className='device-tile-top';const arrow=document.createElement('span');arrow.textContent='↗';arrow.setAttribute('aria-hidden','true');top.append(deviceIcon(b.kind),arrow);
     const kind=document.createElement('span');kind.className='device-tile-kind';kind.textContent=deviceKinds[b.kind]||'Enhet';
     const title=document.createElement('strong');title.className='device-tile-name';title.textContent=b.name;
     const state=document.createElement('span');state.className='device-tile-status';
     const recentUpload=b.last_upload_at && Date.now()-Date.parse(b.last_upload_at)<120000;
-    state.textContent=b.pending_remove?'● Fjernes':b.portal_measurements_paused?'● Måledeling pauset':control?.error?'● Styring trenger oppfølging':control?'● Av/på-test pågår':!b.local_enabled?'● Deling pauset':!b.device_id||b.needs_sync?'● Venter på synkronisering':snapshot.connection!=='ONLINE'?'● Venter på forbindelse':recentUpload?'● Deler målinger':'● Sjekk målestatus';
-    if(!b.portal_measurements_paused&&!b.pending_remove&&recentUpload&&b.local_enabled&&snapshot.connection==='ONLINE'&&!control&&!b.needs_sync)state.classList.add('active');
+    state.textContent='● '+shared.label;state.title=shared.reason;copy.append(Object.assign(document.createElement('p'),{textContent:shared.reason}));
     const bottom=document.createElement('span');bottom.className='device-tile-bottom';
     const power=document.createElement('span');const label=document.createElement('small');label.textContent='Siste kjente effekt';const value=document.createElement('strong');value.textContent=typeof b.last_power_w==='number'&&Number.isFinite(b.last_power_w)?(b.last_power_w/1000).toLocaleString('nb-NO',{maximumFractionDigits:3})+' kW':'–';power.append(label,value);
     const hint=document.createElement('span');hint.className='device-tile-hint';hint.textContent='Innstillinger';bottom.append(power,hint);tile.append(top,kind,title,state,actual.cloneNode(true),bottom);
@@ -151,7 +154,10 @@ function renderBindings(){
 }
 async function refresh(){
   snapshot=await request('status');$('#loading').hidden=true;$('#setup').hidden=snapshot.paired;$('#connected').hidden=!snapshot.paired;
-  $('#connection').textContent=snapshot.connection==='ONLINE'?'● Tilkoblet SMARTi · oppdatert '+new Date(snapshot.last_sync).toLocaleTimeString('nb-NO'):'Venter på kontakt med SMARTi';
+  const online=snapshot.connection==='ONLINE'&&Date.now()-Date.parse(snapshot.last_sync)<45000;
+  const limited=snapshot.bindings.some(b=>controlState(b).color!=='green');
+  const heading=document.createElement('strong');heading.textContent=online?(limited?'SMARTi Flex – Begrenset tilkobling':'SMARTi Flex – Tilkoblet'):'SMARTi Flex – Frakoblet';const detail=document.createElement('span');detail.textContent=online?(limited?'Én eller flere enheter kan ikke styres.':'Alle systemer fungerer normalt.'):'Ingen forbindelse til SMARTi Flex.';$('#connection').replaceChildren(heading,detail);
+  $('#connection').dataset.control=online?(limited?'orange':'green'):'red';
   $('#server-address').textContent=snapshot.cloud_url||'';renderBindings();const fault=(snapshot.controls||[]).find(c=>c.error);if(fault)message(fault.error,true);else if(snapshot.error)message(snapshot.error,true);controls();
 }
 $('#add').onclick=()=>start();$('#cancel').onclick=close;$('#back').onclick=()=>showStep(step-1);
@@ -160,7 +166,7 @@ $('#next').onclick=()=>{
   if(step<3){if(step===2&&!editing){$('#device-name').value=device.name;$('#power').value=String(Math.min(1000000,Math.max(0,sensor.power_w||0)));$('#power-help').textContent=sensor.power_w>0?'Forhåndsutfylt fra den ferske effektmålingen. Juster hvis du kjenner enhetens kapasitet.':'Ingen positiv, fersk effektmåling. Anslaget er satt til 0 til du kjenner kapasiteten.';}showStep(step+1);return;}
   const name=$('#device-name'),power=$('#power');if(!name.reportValidity()||!$('#device-kind').reportValidity()||!power.reportValidity())return;
   if(!name.value.trim()){message('Gi enheten et navn.',true);name.focus();return;}
-  void action(async()=>{await request(editing?'bindings/'+editing.local_id+'/edit':'bindings','POST',{entity_id:device.entity_id,power_entity:sensor.entity_id,name:name.value.trim(),kind:$('#device-kind').value,estimated_w:Number(power.value)||0,reporting_mode:$('#reporting-mode').value,max_duration_seconds:Number($('#duration').value)});close();await refresh();message(`${name.value.trim()} er ${editing?'oppdatert':'lagt til'}. Administrer måledeling og styring i SMARTi Flex-portalen.`);});
+  void action(async()=>{await request(editing?'bindings/'+editing.local_id+'/edit':'bindings','POST',{entity_id:device.entity_id,power_entity:sensor.entity_id,name:name.value.trim(),kind:$('#device-kind').value,estimated_w:Number(power.value)||0,reporting_mode:$('#reporting-mode').value,max_duration_seconds:Number($('#duration').value),control_consent:$('#control-consent').checked});close();await refresh();message(`${name.value.trim()} er ${editing?'oppdatert':'lagt til'}. Tillatelsen synkroniseres automatisk med SMARTi Flex.`);});
 };
 $('#pair').onsubmit=e=>{e.preventDefault();const form=e.currentTarget;void action(async()=>{await request('pair','POST',Object.fromEntries(new FormData(form)));form.reset();await refresh();message('Du er koblet til. Legg til den første enheten din.');});};
 $('#disconnect').onclick=()=>{if(confirm('Fjerne tilkoblingen og de lokale enhetskoblingene? Trekk også tilbake tilgangen i SMARTi-portalen.'))void action(async()=>{await request('disconnect','POST');close();await refresh();});};
@@ -172,4 +178,12 @@ function haStatus(status){
   const labels={on:'På',off:'Av',heat:'Varmemodus',cool:'Kjølemodus',heating:'Varmer',cooling:'Kjøler',idle:'Hviler',auto:'Automatisk',unavailable:'Utilgjengelig',unknown:'Ukjent'};
   const value=status.state==='off'?'off':status.action||status.state;
   return (Date.now()-Date.parse(status.checked_at)>90000?'Sist kjent: ':'Status: ')+(labels[value]||value);
+}
+
+function controlState(b){
+  if(b.consent_error)return {color:'orange',label:'Samtykke må bekreftes',reason:b.consent_error};
+  if(b.pending_consent)return {color:b.pending_consent.enabled?'orange':'red',label:b.pending_consent.enabled?'Venter på godkjenning hos SMARTi':'Styring stoppet lokalt',reason:'Tillatelsen venter på synkronisering. Prøver igjen automatisk.'};
+  if(snapshot.connection!=='ONLINE'||!snapshot.last_sync||Date.now()-Date.parse(snapshot.last_sync)>45000)return {color:'red',label:'Frakoblet',reason:'Ingen fersk forbindelse til SMARTi Flex.'};
+  if(b.needs_sync||!b.device_id)return {color:'orange',label:'Venter på synkronisering',reason:'Enheten registreres hos SMARTi Flex.'};
+  return b.control_status||{color:'orange',label:'Venter på styringsstatus',reason:'Kontroller at SMARTi-serveren er oppdatert.'};
 }

@@ -1,5 +1,13 @@
 # Endringslogg
 
+## 0.9.0
+
+- Styringssamtykke ved registrering og tilbaketrekking direkte i HA.
+- Felles versjonert samtykke og styringsstatus med SMARTi Flex.
+- Varig lokal sperre ved nettbrudd og automatisk ettersynkronisering.
+- Grønn, rød og oransje statusring og overordnet forbindelsesstatus.
+- Krever oppdatert SMARTi-server med agent-samtykkeendepunkt.
+
 ## 0.8.6
 
 - Varige tilbakeføringsforsøk med økende intervall opptil 60 sekunder.

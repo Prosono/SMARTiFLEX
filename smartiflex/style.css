@@ -10,3 +10,19 @@ main{max-width:1200px}#saved{padding:0;border:0;background:transparent}.section-
 dialog{color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(620px,calc(100% - 28px));max-height:calc(100dvh - 32px);padding:28px;overflow:auto;overscroll-behavior:contain}dialog::backdrop{background:rgb(1 1 16 / .78)}body:has(dialog[open]){overflow:hidden}.dialog-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}.dialog-heading h2{overflow-wrap:anywhere}.dialog-heading .eyebrow{margin-top:0}.dialog-heading button{flex-shrink:0}dialog .binding{display:block;padding-bottom:0}dialog .binding-actions{max-width:none;justify-content:flex-start;margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}dialog .binding>div>strong:first-child{display:none}#dialog-feedback{padding:12px;margin-top:16px;background:#193328;color:#b2dfc0;border-radius:6px}#dialog-feedback.feedback-error{background:#352023;color:#ffb7b2}
 @media(max-width:1000px){#bindings{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:640px){#bindings{grid-template-columns:1fr}.device-tile{padding:20px}.device-tile-top{margin-bottom:16px}dialog{padding:20px}.binding-actions button{width:100%}}
 @media(prefers-reduced-motion:reduce){.device-tile{transition:none}}
+/* Shared semantic control status; labels always accompany colour. */
+@property --control-angle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
+[data-control="green"] { --control-color: #7bd49b; }
+[data-control="red"] { --control-color: #ed8989; }
+[data-control="orange"] { --control-color: #ffb15e; }
+.control-ring { position: relative; isolation: isolate; border-color: var(--control-color, #ffb15e) !important; }
+.control-ring::after { content: ''; position: absolute; inset: -2px; padding: 2px; border-radius: inherit; pointer-events: none; background: conic-gradient(from var(--control-angle), transparent 0deg 250deg, var(--control-color) 300deg, transparent 360deg); mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0); mask-composite: exclude; }
+.control-ring[data-control="green"]::after { animation: control-orbit 7s linear infinite; }
+@keyframes control-orbit { to { --control-angle: 360deg; } }
+.control-connection { border: 1px solid var(--control-color); border-radius: 10px; padding: 18px 22px; margin-bottom: 20px; }
+.control-connection strong, #connection[data-control] { color: var(--control-color); }
+.control-connection p { margin: 6px 0 0; }
+@media (prefers-reduced-motion: reduce) { .control-ring::after { animation: none !important; } }
+
+.control-ring .device-tile-status{color:var(--control-color)}
+#connection{display:grid;gap:6px}#connection strong{font-size:16px}#connection>span{color:#bdb7c9;font-size:13px}

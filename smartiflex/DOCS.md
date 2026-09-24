@@ -1,108 +1,37 @@
-# SMARTi Flex – brukerveiledning
+# Felles styringssamtykke – HA 0.9.0
 
-Åpne appen gjennom **Åpne webgrensesnitt** i Home Assistant. Appen har ingen eksternt
-eksponert webport og krever ikke YAML-konfigurasjon.
+Kunden velger enhet, effektsensor, tidsgrense og eksplisitt styringssamtykke i HA.
+Avkrysningen er av som standard. Måledeling kan brukes uten styringssamtykke.
+Eksisterende serverlagrede samtykker beholdes ved oppdatering.
 
-## Server og engangskode
+Endringer sendes med forventet samtykkeversjon og unik forespørsels-ID.
+Gjentakelse etter tapt svar er idempotent. En forsinket godkjenning kan ikke
+overstyre en nyere portalendring; kunden må bekrefte et nytt ja ved konflikt.
+Tilbaketrekking forsøkes igjen med fersk versjon dersom det er nødvendig.
 
-Angi SMARTi-backendens grunnadresse, for eksempel `https://flex.example.no`, uten
-`/api` eller andre stier. Adressen må være tilgjengelig fra Home Assistant og ha et
-gyldig HTTPS-sertifikat. Bruk en ny kode fra portalens **Tilkobling**; koder utløper
-etter ti minutter og kan bare brukes én gang.
+Ved tilbaketrekking sperres lokal utførelse før nettverkskall. Sperren og køen
+lagres på disk. Pågående styring tilbakeføres gjennom eksisterende journal og
+retry-løp. Serveren stopper ventende kommandoer og ber utførte kommandoer om
+ tilbakeføring. Ved nettbrudd gjelder lokal sperre straks, mens UI viser at
+serversynkronisering venter. Normal synkronisering går hvert 15. sekund.
 
-Det finnes ingen innebygd offentlig SMARTi-server i denne utviklingsversjonen.
-Backend må settes opp separat før sammenkobling kan testes.
+Begge apper bruker samme serverberegnede status. Grønt krever samtykke, fersk
+kontakt, støttet styring, ferske målinger og lokal/servermessig styringsklarhet.
+Rødt angir manglende samtykke, suspensjon eller utilgjengelig enhet/HA. Oransje
+angir venting, sperrer eller styringsfeil. HA overstyrer gammel serverstatus ved
+frakobling eller lokalt usynkronisert samtykke. Tekst forklarer alltid fargen.
+Grønn statusring animeres med respekt for redusert bevegelse.
 
-## Enheter og målinger
+Ingen ekstra portalaktivering er nødvendig for samtykke gitt i HA. NODES-
+godkjenning, porteføljemedlemskap, gyldig handel og effekt-/tidsgrenser er fortsatt
+markedsvilkår. Når installert effekt er ukjent, brukes kundens oppgitte
+fleksibilitetsgrense som styringsgrense. Kjent installert effekt begrenser fortsatt;
+vi oppretter ikke en fiktiv verdi for fysisk installert effekt.
 
-Trykk **Legg til enhet** og følg tre steg:
+Tester dekker samtykke begge veier, idempotens, konflikter, varig offline-
+tilbaketrekking og tilbakeføring av utført kommando. Visuell HA-kontroll er gjort
+med fiktive enheter. Fysisk ende-til-ende-verifisering krever oppdatert HA-app og
+en separat autorisert aktivering.
 
-1. **Enhet:** Søk på navnet og velg en bryter, termostat eller tallstyring fra Home Assistant.
-2. **Måling:** Velg effektmålingen for denne enheten. Mulige matcher foreslås ut fra navn,
-   men du må selv bekrefte at målingen tilhører enheten. Ikke velg totalmåleren for boligen.
-3. **Bekreft:** Navnet fylles inn automatisk. Velg lokal testgrense i minutter og bekreft
-   at du vil dele effektmålingene med SMARTi.
 
-Under **Tilpass effektgrensen** kan du endre anslaget. Det forhåndsutfylles fra en positiv,
- fersk effektmåling når den finnes, ellers 0. Dette er ikke en verifisert kapasitet. Ved 0
- kan målinger fortsatt deles. Kommunikasjonstesten krever bare aktivert testdeltakelse og forbindelse til Home Assistant, ikke måledata eller positivt effektanslag.
-
-Enheter og målinger som allerede er lagt til, vises ikke som nye valg.
-Synkronisering skjer normalt hvert 15. sekund. **Kommunikasjonstest** aktiveres separat
- i portalen og gir ingen fysisk styring.
-
-## Pause og frakobling
-
-**Pause lokalt** stopper deling av nye målinger for enheten og avviser nye tester.
-Portalens siste måling kan fortsatt vises frem til den blir foreldet.
-**Koble fra lokalt** fjerner de lagrede koblingene. Trekk også tilbake tilgangen
-i portalen for å ugyldiggjøre installasjonens servertilgang.
-
-## Feilsøking
-
-- **Ingen forbindelse:** Kontroller backendens HTTPS-adresse og nettverkstilgang.
-  `localhost` og `127.0.0.1` viser til appens egen maskin, ikke utviklerens Mac.
-- **Ugyldig kode:** Lag en ny kode i portalen. En allerede tilkoblet installasjon
-  må kobles fra i portalen før den kan pares på nytt.
-- **Ingen effekt:** Sensoren må ha numeriske verdier i W eller kW og ferske oppdateringer.
-- **Test avvist:** Kontroller samtykke, lokal pause, varighetsgrenser og målingenes alder.
-- **Installasjon eller oppstart feiler:** Se appens logg. Rapportér feilen i repositoryets
-  Issues, men ikke legg ved tilkoblingskoder, token eller private måledata.
-
-Fysisk av/på-pilot for brytere er tilgjengelig fra 0.5.0, avslått som standard.
-Appen utfører ikke leveranseverifikasjon eller oppgjør.
-
-## Redigere en enhet
-
-Velg **Rediger** ved enheten. Endre navn, effektanslag eller tidsgrense i bekreftelsen.
-Bruk **Tilbake** for å endre effektsensor eller valgt enhet. Bekreft delingen og trykk
-**Lagre endringer**. Historikk og enhets-ID beholdes. Når endringen er synkronisert,
-må kommunikasjonstest aktiveres på nytt i portalen. Lokale pauser beholdes.
-
-## Målestatus
-
-Hver enhet viser om serveren har mottatt målingen, og hva Home Assistant rapporterer.
-Målinger fra siste døgn sendes med sitt opprinnelige tidspunkt. Verdier eldre enn
-45 sekunder teller ikke som tilgjengelig fleksibilitet. Ukjente/ugyldige verdier og
-målinger eldre enn ett døgn sendes ikke; appen viser hvorfor. Den oppdaterer aldri
-tidspunktet for å få en gammel sensorverdi til å se fersk ut.
-
-## Sensorer som bare rapporterer endringer
-
-Fra 0.4.0: Åpne enheten med **Rediger**, velg **Bare når verdien endres** under rapportering og lagre. Behold standardvalget for sensorer som rapporterer regelmessig. Eksisterende enheter endres ikke automatisk.
-
-SMARTi viderefører en gyldig verdi mens appen kan lese sensoren i HA. Portalen viser separat tidspunkt for sensorrapporten og HA-kontrollen. Ved utilgjengelig sensor eller mistet forbindelse stopper nye datapunkter, og status utløper etter 45 sekunder. Tidligere hull i historikken fylles ikke ut. Videreførte verdier brukes ikke som verifisert markedskapasitet.
-
-Fra 0.4.1 er endringsrapportering standard også for gamle oppsett uten lagret valg. Har enheten allerede «Regelmessig», velg «Bare når verdien endres» under Rediger dersom sensoren bare rapporterer endringer. En uendret verdi vises aktiv mens HA-kontrollen fortsetter, men regnes ikke som verifisert markedskapasitet.
-
-## Av/på-pilot for brytere (0.5.0)
-
-Vanlig måling og kommunikasjonstest virker som før. Ingen fysisk styring blir automatisk
-aktivert når du oppdaterer appen.
-
-For en egnet bryter kan du velge **Tillat av/på-test** og bekrefte lokalt. Deling må være
-aktiv, samtykke må være gitt i portalen, og SMARTi-operatøren må særskilt ha åpnet
-pilotstyring på serveren. Termostater og tallstyringer har fortsatt bare målinger og
-kommunikasjonstest. Velg bare utstyr som tåler å avbrytes og slås på igjen.
-
-En fysisk test kontrollerer at bryteren er på før den slås av. Lokal og sentral tidsgrense
-må overholdes. Appen lagrer en egen tilbakeføringsjournal før den slår av bryteren, og
-kontrollerer deretter tilstanden i Home Assistant. **Stopp styring** ber om tilbakeføring.
-Pause, redigering og frakobling opphever den lokale tillatelsen.
-
-En lokal overvåker forsøker å slå på igjen når tiden er ute, når tillatelsen forsvinner,
-eller når forbindelsen til SMARTi svikter. Den virker uavhengig av sending av måledata.
-Tilbakeføringsjournalen beholdes også ved frakobling og omstart. Ikke slett den for å
-fjerne en feilmelding. Appen må kjøre og nå bryteren for å kunne tilbakeføre; en avslått
-eller havarert HA-maskin kan ikke garantere tidsfristen.
-
-Hvis bryteren er endret manuelt eller av en annen automasjon etter testen, blir dette
-ikke automatisk overstyrt. Ved uavklart tilbakeføring vises en feil, og ny fysisk styring
-sperres. Kontroller bryteren i Home Assistant og slå den på manuelt når det er riktig.
-Etter frakobling kan operatøren også måtte følge opp en gammel kommando som ikke fikk
-levert siste kvittering.
-
-«Utført» og «Tilbakeført» beskriver bryterens HA-tilstand. De beviser ikke levert
-fleksibilitet og utløser ingen betaling. Oppdater SMARTi-backenden før appen brukes
-(migrering h031e0a8b719). Fysisk pilotstyring krever separat validering på den installerte
-Supervisor-appen før den åpnes på serveren.
+Se README for installasjon og tilkobling.

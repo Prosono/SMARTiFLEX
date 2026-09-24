@@ -21,7 +21,7 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.8.6"
+VERSION = "0.9.0"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -514,7 +514,7 @@ async def _synchronize():
             entities = {e["entity_id"]: e for e in await ha_states()}
             async def heartbeat():
                 journal = load_control()
-                ready = [b["device_id"] for b in state["bindings"] if b.get("device_id") and locally_permitted(b, journal)]
+                ready = [b["device_id"] for b in state["bindings"] if b.get("device_id") and locally_permitted(b, journal) and entities.get(b.get("entity_id"), {}).get("state") not in (None, "unknown", "unavailable") and (not b.get("entity_id", "").startswith("climate.") or "off" in entities.get(b.get("entity_id"), {}).get("attributes", {}).get("hvac_modes", []))]
                 states = []
                 for b in state["bindings"]:
                     entity = entities.get(b.get("entity_id"), {})
@@ -527,7 +527,19 @@ async def _synchronize():
                 active = payload.get("active_dispatch_ids")
                 runtime.update(cloud_control_enabled=payload.get("physical_control_enabled") is True and isinstance(active, list),
                     active_dispatch_ids=active if isinstance(active, list) else [], control_lease_at=utcnow().isoformat())
-                return {d["id"]: d for d in payload["devices"]}
+                permissions = {d["id"]: d for d in payload["devices"]}
+                runtime["connection_status"] = payload.get("connection_status")
+                for b in state["bindings"]:
+                    permission = permissions.get(b.get("device_id"))
+                    if permission:
+                        b["portal_consent"] = permission
+                        b["control_status"] = permission.get("control_status")
+                        if not b.get("pending_consent") and not b.get("needs_sync"):
+                            b["control_consent"] = permission["enabled"]
+                            b["physical_control_enabled"] = permission["enabled"] and b.get("entity_id", "").startswith(("switch.", "climate."))
+                            b["max_duration_seconds"] = permission["constraints"]["max_duration_seconds"]
+                save_state(state)
+                return permissions
             consents = await heartbeat()
             await restore_pending()
             await flush_control_results(client)
@@ -541,16 +553,36 @@ async def _synchronize():
                         save_state(state)
                         continue
                     if not binding.get("device_id"):
-                        response = await client.post("/api/agent/devices", json={k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w")})
+                        response = await client.post("/api/agent/devices", json={**{k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w")}, "control_consent": binding.get("control_consent", False), "max_duration_seconds": binding["max_duration_seconds"]})
                         response.raise_for_status()
                         binding["device_id"] = response.json()["id"]
                         save_state(state)
                     if binding.get("needs_sync"):
-                        response = await client.post(f"/api/agent/devices/{binding['device_id']}/configuration", json={**{k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w")}, "revision": binding["revision"]})
+                        response = await client.post(f"/api/agent/devices/{binding['device_id']}/configuration", json={**{k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w") }, "revision": binding["revision"], "control_consent": binding.get("control_consent", False), "max_duration_seconds": binding["max_duration_seconds"]})
                         response.raise_for_status()
                         binding["needs_sync"] = False
                         blocked_local_ids.discard(binding["local_id"])
                         consents.pop(binding["device_id"], None)
+                        save_state(state)
+                    pending_consent = binding.get("pending_consent")
+                    if pending_consent:
+                        response = await client.post(f"/api/agent/devices/{binding['device_id']}/consent", json=pending_consent)
+                        if response.status_code == 409:
+                            # Do not overwrite a newer portal grant/revocation with an old grant.
+                            if pending_consent["enabled"]:
+                                binding.pop("pending_consent", None)
+                                binding["consent_error"] = "Tillatelsen ble endret i SMARTi Flex. Kontroller status og gi samtykke på nytt."
+                            else:
+                                pending_consent["version"] = consents[binding["device_id"]]["consent_version"]
+                        else:
+                            response.raise_for_status()
+                            permission_reply = response.json()
+                            binding["portal_consent"] = permission_reply
+                            binding["control_consent"] = permission_reply["enabled"]
+                            binding["physical_control_enabled"] = permission_reply["enabled"] and binding.get("entity_id", "").startswith(("switch.", "climate."))
+                            binding.pop("pending_consent", None)
+                            binding.pop("consent_error", None)
+                            blocked_local_ids.discard(binding["local_id"])
                         save_state(state)
                     permission = consents.get(binding.get("device_id"))
                     if permission and permission.get("constraints", {}).get("measurements_enabled") is False:
@@ -584,6 +616,8 @@ async def _synchronize():
                     binding["measurement_status"] = f"SMARTi avviste synkroniseringen (HTTP {code}). Prøv igjen eller kontroller serveren." if code else "Kunne ikke sende til SMARTi. Prøver igjen automatisk."
                 finally:
                     save_state(state)
+            consents = await heartbeat()
+            await restore_pending()
             response = await client.get("/api/agent/commands")
             response.raise_for_status()
             commands = response.json()
@@ -785,6 +819,7 @@ async def entities():
 
 
 class BindingRequest(BaseModel):
+    control_consent: bool = False
     kind: Literal["HEAT_PUMP", "EV_CHARGER", "OVEN", "WATER_HEATER", "UNDERFLOOR_HEATING", "BATTERY", "HVAC", "SAUNA", "GENERIC_LOAD"] | None = None
     reporting_mode: Literal["periodic", "on_change"] = "on_change"
     entity_id: str = Field(max_length=200)
@@ -810,9 +845,17 @@ async def bind(body: BindingRequest):
             raise HTTPException(409, "Koble til SMARTi først")
         if any(b["entity_id"] == body.entity_id or b["power_entity"] == body.power_entity for b in state["bindings"]):
             raise HTTPException(409, "Enheten eller effektsensoren er allerede valgt")
-        state["bindings"].append({**body.model_dump(), "local_id": str(uuid4()), "device_id": None, "kind": body.kind or "GENERIC_LOAD", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True, "physical_control_enabled": domain in ("switch", "climate"), "portal_managed": True})
+        state["bindings"].append({**body.model_dump(), "local_id": str(uuid4()), "device_id": None, "kind": body.kind or "GENERIC_LOAD", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True, "physical_control_enabled": body.control_consent and domain in ("switch", "climate"), "portal_managed": True})
         save_state(state)
-        return {"ok": True}
+    await sync_now()
+    return {"ok": True}
+
+
+async def sync_now():
+    try:
+        await synchronize()
+    except (httpx.HTTPError, ValueError, KeyError):
+        runtime.update(connection="OFFLINE", error="Endringen er lagret lokalt og venter på forbindelse til SMARTi. Prøver igjen automatisk.")
 
 
 class ParticipationRequest(BaseModel):
@@ -826,7 +869,28 @@ async def participation(local_id: str, body: ParticipationRequest):
 
 @app.post("/bindings/{local_id}/control")
 async def local_control(local_id: str, body: ParticipationRequest):
-    raise HTTPException(409, "Administrer måledeling og styring i SMARTi Flex-portalen.")
+    # Revoke the local execution gate before waiting on network synchronization.
+    if not body.enabled:
+        blocked_local_ids.add(local_id)
+    async with state_lock:
+        state = load_state()
+        binding = next((b for b in state["bindings"] if b["local_id"] == local_id), None)
+        if not binding or binding.get("pending_remove"):
+            raise HTTPException(404)
+        if body.enabled and not binding.get("entity_id", "").startswith(("switch.", "climate.")):
+            raise HTTPException(422, "Denne enhetstypen støtter ikke styring ennå")
+        permission = binding.get("portal_consent")
+        if not permission or not binding.get("device_id"):
+            raise HTTPException(409, "Vent til enheten er synkronisert før du endrer tillatelsen")
+        binding["control_consent"] = body.enabled
+        binding["physical_control_enabled"] = False
+        binding["pending_consent"] = {"enabled": body.enabled, "version": permission["consent_version"], "request_id": str(uuid4()), "max_duration_seconds": binding["max_duration_seconds"]}
+        binding.pop("consent_error", None)
+        save_state(state)
+    if not body.enabled:
+        await restore_pending(force=True, local_id=local_id)
+    await sync_now()
+    return {"ok": True}
 
 
 @app.post("/bindings/{local_id}/remove")
@@ -866,11 +930,12 @@ async def edit_binding(local_id: str, body: BindingRequest):
         if any(c.get("local_id") == local_id and c["state"] not in ("RESTORED", "REJECTED") for c in load_control()["commands"].values()):
             raise HTTPException(409, "Tidligere styring må tilbakeføres før du endrer entitet. Kontroller enheten i Home Assistant.")
         binding.update(body.model_dump(exclude_none=True))
-        binding["physical_control_enabled"] = domain in ("switch", "climate")
+        binding["physical_control_enabled"] = body.control_consent and domain in ("switch", "climate")
         binding["edit_permission_repaired"] = True
         binding.update(revision=str(uuid4()), needs_sync=True, kind=body.kind or binding.get("kind", "GENERIC_LOAD"), capabilities={"switch": ["TURN_ON", "TURN_OFF"], "climate": ["SET_TEMPERATURE"], "number": []}[domain] + ["READ_POWER"], measurement_status="Endringen venter på synkronisering med SMARTi.")
         for key in ("last_observed_at", "last_power_w", "last_upload_at"):
             binding.pop(key, None)
         save_state(state)
     await restore_pending(force=True, local_id=local_id)
+    await sync_now()
     return {"ok": True}
