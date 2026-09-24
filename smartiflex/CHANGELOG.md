@@ -1,3 +1,9 @@
+# 0.9.1
+
+- Viser status og gjenstående innlæringstid på enheten.
+- Ukjent effekt starter 24 timers innlæring i SMARTi-backenden.
+- Tydeligere samtykkesynkronisering uten ekstra portalgodkjenning.
+
 # Endringslogg
 
 ## 0.9.0

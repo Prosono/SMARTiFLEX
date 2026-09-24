@@ -140,7 +140,7 @@ function renderBindings(){
     state.textContent='● '+shared.label;state.title=shared.reason;copy.append(Object.assign(document.createElement('p'),{textContent:shared.reason}));
     const bottom=document.createElement('span');bottom.className='device-tile-bottom';
     const power=document.createElement('span');const label=document.createElement('small');label.textContent='Siste kjente effekt';const value=document.createElement('strong');value.textContent=typeof b.last_power_w==='number'&&Number.isFinite(b.last_power_w)?(b.last_power_w/1000).toLocaleString('nb-NO',{maximumFractionDigits:3})+' kW':'–';power.append(label,value);
-    const hint=document.createElement('span');hint.className='device-tile-hint';hint.textContent='Innstillinger';bottom.append(power,hint);tile.append(top,kind,title,state,actual.cloneNode(true),bottom);
+    const hint=document.createElement('span');hint.className='device-tile-hint';hint.textContent='Innstillinger';bottom.append(power,hint);tile.append(top,kind,title,state,Object.assign(document.createElement('small'),{textContent:shared.reason}),actual.cloneNode(true),bottom);
     tile.onclick=()=>{openedDevice=b.local_id;$('#dialog-feedback').hidden=true;$('#device-dialog-title').textContent=b.name;$('#device-details').replaceChildren(row);$('#device-dialog').showModal();};
     $('#bindings').append(tile);
     if(focusedTile===b.local_id)tile.focus();
@@ -163,7 +163,7 @@ async function refresh(){
 $('#add').onclick=()=>start();$('#cancel').onclick=close;$('#back').onclick=()=>showStep(step-1);
 $('#device-search').oninput=drawChoices;$('#sensor-search').oninput=drawChoices;$('#confirm').onchange=controls;
 $('#next').onclick=()=>{
-  if(step<3){if(step===2&&!editing){$('#device-name').value=device.name;$('#power').value=String(Math.min(1000000,Math.max(0,sensor.power_w||0)));$('#power-help').textContent=sensor.power_w>0?'Forhåndsutfylt fra den ferske effektmålingen. Juster hvis du kjenner enhetens kapasitet.':'Ingen positiv, fersk effektmåling. Anslaget er satt til 0 til du kjenner kapasiteten.';}showStep(step+1);return;}
+  if(step<3){if(step===2&&!editing){$('#device-name').value=device.name;$('#power').value='0';$('#power-help').textContent='Ukjent maks? Behold 0. SMARTi lærer effekten fra 24 timer med målinger før styring.';}showStep(step+1);return;}
   const name=$('#device-name'),power=$('#power');if(!name.reportValidity()||!$('#device-kind').reportValidity()||!power.reportValidity())return;
   if(!name.value.trim()){message('Gi enheten et navn.',true);name.focus();return;}
   void action(async()=>{await request(editing?'bindings/'+editing.local_id+'/edit':'bindings','POST',{entity_id:device.entity_id,power_entity:sensor.entity_id,name:name.value.trim(),kind:$('#device-kind').value,estimated_w:Number(power.value)||0,reporting_mode:$('#reporting-mode').value,max_duration_seconds:Number($('#duration').value),control_consent:$('#control-consent').checked});close();await refresh();message(`${name.value.trim()} er ${editing?'oppdatert':'lagt til'}. Tillatelsen synkroniseres automatisk med SMARTi Flex.`);});
@@ -182,7 +182,7 @@ function haStatus(status){
 
 function controlState(b){
   if(b.consent_error)return {color:'orange',label:'Samtykke må bekreftes',reason:b.consent_error};
-  if(b.pending_consent)return {color:b.pending_consent.enabled?'orange':'red',label:b.pending_consent.enabled?'Venter på godkjenning hos SMARTi':'Styring stoppet lokalt',reason:'Tillatelsen venter på synkronisering. Prøver igjen automatisk.'};
+  if(b.pending_consent)return {color:b.pending_consent.enabled?'orange':'red',label:b.pending_consent.enabled?'Godkjent i HA · synkroniserer':'Styring stoppet lokalt',reason:'Valget er lagret i HA og sendes automatisk til SMARTi. Ingen ekstra godkjenning i portalen er nødvendig.'};
   if(snapshot.connection!=='ONLINE'||!snapshot.last_sync||Date.now()-Date.parse(snapshot.last_sync)>45000)return {color:'red',label:'Frakoblet',reason:'Ingen fersk forbindelse til SMARTi Flex.'};
   if(b.needs_sync||!b.device_id)return {color:'orange',label:'Venter på synkronisering',reason:'Enheten registreres hos SMARTi Flex.'};
   return b.control_status||{color:'orange',label:'Venter på styringsstatus',reason:'Kontroller at SMARTi-serveren er oppdatert.'};
