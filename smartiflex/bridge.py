@@ -18,10 +18,15 @@ from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("smartiflex.bridge")
+logger.setLevel(logging.INFO)
+_handler = logging.StreamHandler()
+_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logger.addHandler(_handler)
+logger.propagate = False
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -331,20 +336,37 @@ async def restore_pending(*, force=False, local_id=None, preserve_active=False):
             binding = bindings.get(item["local_id"], {})
             # A planned process restart must not terminate a confirmed lease.
             # Keep the durable original state; expiry is still absolute.
-            if (preserve_active and item["state"] == "ACTIVE" and item.get("hold_off")
+            if (preserve_active and not item.get("stop_reason") and item["state"] in ("ACTIVE", "PREPARED") and item.get("hold_off")
                     and utcnow() < parse_time(item["expires_at"])
                     and locally_permitted(binding, journal)
                     and binding.get("entity_id") == item["entity_id"]):
                 return
+            # The durable grant expires at the agreed end, not when telemetry
+            # stalls. Only an explicit server/local stop can shorten it.
+            reason = item.get("stop_reason")
+            if force:
+                reason = "explicit_local_stop"
+            elif utcnow() >= parse_time(item["expires_at"]):
+                reason = "activation_ended"
+            elif not locally_permitted(binding, journal) or binding.get("entity_id") != item["entity_id"]:
+                reason = "local_permission_or_binding_changed"
+            elif runtime.get("control_lease_at") is not None:
+                if not runtime.get("cloud_control_enabled"):
+                    reason = "server_control_disabled"
+                elif command_id not in runtime.get("active_dispatch_ids", []):
+                    reason = "server_dispatch_stopped"
+            holding = not reason and item["state"] in ("ACTIVE", "PREPARED") and item.get("hold_off")
+            if reason and not item.get("restore_reason"):
+                item["restore_reason"] = reason
+                logger.info("Restoring command %s: reason=%s expires_at=%s", command_id, reason, item["expires_at"])
+                save_control(journal)
             try:
                 entity = await ha_entity(item["entity_id"])
                 prior = item.get("prior_state", {"state": "on", "attributes": {}})
-                # Hold the saved original state until the live lease ends. A
-                # manual ON is not a completed restoration during an activation.
-                holding = (not force and item["state"] == "ACTIVE" and item.get("hold_off")
-                    and utcnow() < parse_time(item["expires_at"]) and cloud_control_current()
-                    and command_id in runtime.get("active_dispatch_ids", [])
-                    and locally_permitted(binding, journal) and binding.get("entity_id") == item["entity_id"])
+                if holding and utcnow() >= parse_time(item["expires_at"]):
+                    holding = False
+                    item["restore_reason"] = "activation_ended"
+                    logger.info("Restoring command %s: reason=activation_ended", command_id)
                 if holding:
                     if entity.get("state") in (None, "unknown", "unavailable"):
                         item["local_error"] = "Kan ikke bekrefte avslått tilstand. Prøver igjen."
@@ -362,6 +384,9 @@ async def restore_pending(*, force=False, local_id=None, preserve_active=False):
                     else:
                         item["off_signature"] = state_signature(entity)
                         item.pop("local_error", None)
+                        if item["state"] == "PREPARED":
+                            item["state"] = "ACTIVE"
+                            queue_control_result(journal, command_id, "EXECUTED", physical_execution=True, observed_at=utcnow().isoformat())
                     save_control(journal)
                     return
                 if matches_prior(entity, prior):
@@ -370,13 +395,6 @@ async def restore_pending(*, force=False, local_id=None, preserve_active=False):
                     return
                 if entity.get("state") in (None, "unknown", "unavailable"):
                     restore_failed(journal, command_id, "Enheten er utilgjengelig. Tilbakeføring forsøkes når den svarer igjen.")
-                    return
-                # A network read may itself have crossed the deadline or pause.
-                due = (force or item["state"] in ("PREPARED", "RESTORE_FAILED") or utcnow() >= parse_time(item["expires_at"])
-                    or not cloud_control_current() or command_id not in runtime.get("active_dispatch_ids", [])
-                    or item["local_id"] in blocked_local_ids or not binding.get("local_enabled") or not binding.get("physical_control_enabled")
-                    or binding.get("entity_id") != item["entity_id"] or binding.get("needs_sync"))
-                if not due:
                     return
                 signature = item.get("off_signature")
                 if entity.get("context", {}).get("user_id") and (not signature or signature != state_signature(entity)):
@@ -399,7 +417,16 @@ async def restore_pending(*, force=False, local_id=None, preserve_active=False):
                     restore_failed(journal, command_id, "Enheten bekreftet ikke på. Kontroller den i Home Assistant.")
                     return
                 restore_done(journal, command_id)
-            except (httpx.HTTPError, ValueError, TypeError, KeyError):
+            except (httpx.HTTPError, ValueError, TypeError, KeyError) as error:
+                if holding:
+                    # A failed reassertion is not a request to restore the load.
+                    # Retain the original state and retry on the next watchdog tick.
+                    # Expiry and explicit revocation checks still run each time.
+                    item["local_error"] = "Kunne ikke holde enheten avslått. Prøver igjen under aktiveringen."
+                    item["hold_retry_count"] = item.get("hold_retry_count", 0) + 1
+                    logger.warning("Off enforcement will retry for command %s (%s)", command_id, type(error).__name__)
+                    save_control(journal)
+                    return
                 restore_failed(journal, command_id, "Kunne ikke gjenopprette enheten. Prøver igjen; kontroller Home Assistant.")
 
         # Independent switches must not wait in line behind an unavailable HA
@@ -468,9 +495,10 @@ async def execute_physical(command, binding, consent):
             queue_control_result(journal, command_id, "EXECUTED", physical_execution=True, observed_at=utcnow().isoformat())
             save_control(journal)
         except (httpx.HTTPError, ValueError, TypeError):
-            # A timeout may have happened after HA applied turn_off. Never retry
-            # the reduction; retain PREPARED and let restoration resolve it.
-            queue_control_result(journal, command_id, "FAILED", "Enheten bekreftet ikke styringen. Gjenoppretting pågår.", physical_execution=False)
+            # HA may have applied OFF despite losing its response. The durable
+            # grant remains valid; the watchdog confirms/retries OFF until expiry.
+            item["local_error"] = "Venter på bekreftet avslått tilstand. Prøver igjen under aktiveringen."
+            logger.warning("Off confirmation pending for command %s until %s", command_id, item["expires_at"])
             save_control(journal)
 
 
@@ -527,6 +555,15 @@ async def _synchronize():
                 active = payload.get("active_dispatch_ids")
                 runtime.update(cloud_control_enabled=payload.get("physical_control_enabled") is True and isinstance(active, list),
                     active_dispatch_ids=active if isinstance(active, list) else [], market_dispatch_ids=payload.get("market_dispatch_ids", []), control_lease_at=utcnow().isoformat())
+                async with control_lock:
+                    journal = load_control()  # The watchdog may have changed it while heartbeat awaited.
+                    for command_id, item in journal["commands"].items():
+                        if item["state"] in ("ACTIVE", "PREPARED") and isinstance(active, list):
+                            if payload.get("physical_control_enabled") is False:
+                                item["stop_reason"] = "server_control_disabled"
+                            elif command_id not in active:
+                                item["stop_reason"] = "server_dispatch_stopped"
+                    save_control(journal)
                 permissions = {d["id"]: d for d in payload["devices"]}
                 runtime["connection_status"] = payload.get("connection_status")
                 for b in state["bindings"]:
@@ -668,7 +705,7 @@ async def worker():
         except Exception as error:
             # No URLs, response bodies, customer values or credentials in logs.
             runtime.update(connection="OFFLINE", error="Forbindelsen kunne ikke oppdateres. Kontroller server og tilkobling.")
-            logger.warning("Synchronization failed (%s)", type(error).__name__)
+            logger.warning("Synchronization failed (%s, http_status=%s)", type(error).__name__, error.response.status_code if isinstance(error, httpx.HTTPStatusError) else "n/a")
             backoff = min(backoff * 2, 120)
         await asyncio.sleep(backoff)
 

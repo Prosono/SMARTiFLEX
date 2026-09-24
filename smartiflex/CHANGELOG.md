@@ -1,3 +1,11 @@
+# 0.9.3
+
+- Holder pågående aktivering gjennom nettbrudd og omstart frem til avtalt slutt.
+- Forsøker AV på nytt ved midlertidige HA-feil og manuell PÅ.
+- Ingen tilbakeføring som følge av utløpt heartbeat alene.
+- Eksplisitt stopp og tilbaketrukket samtykke gjelder fortsatt.
+- Tidsfestede logger med tilbakeføringsårsak. Krever oppdatert SMARTi-server.
+
 # 0.9.1
 
 - Viser status og gjenstående innlæringstid på enheten.

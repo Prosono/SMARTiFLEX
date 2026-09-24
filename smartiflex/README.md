@@ -1,3 +1,9 @@
+## 0.9.3 – hold av gjennom hele aktiveringen
+
+Pågående utkobling beholdes til avtalt slutt ved midlertidig nettbrudd, HA-feil og omstart. AV-kommandoer bekreftes og forsøkes igjen; manuell PÅ under aktiveringen gir ny AV. Opprinnelig tilstand lagres fortsatt varig. Tilbaketrukket samtykke, eksplisitt stopp og endret enhetskobling avslutter styringen. Etter avtalt slutt tilbakeføres opprinnelig tilstand. Appen og HA må kjøre for å utføre kommandoer. Logger viser tidspunkt, kommando og årsak til tilbakeføring. Krever tilsvarende oppdatert SMARTi-server, som skiller midlertidig utilgjengelighet fra tilbaketrukket samtykke.
+
+Eldre versjonsnotater nedenfor beskriver historisk oppførsel; 0.9.3 erstatter reglene om tilbakeføring ved mistet styringsforbindelse.
+
 ## Versjon 0.8.0 – termostater og NODES-styring
 
 Brytere og climate-enheter med off-modus kan styres. Før utkobling lagres modus og relevante temperatur-, preset-, vifte- og swinginnstillinger i en varig journal. Modusen settes til off. Ved slutt, mistet styringsforbindelse eller omstart forsøkes tidligere tilstand gjenopprettet og kontrolleres i HA. Manuelle endringer overstyres ikke; feil vises og beholdes i journalen. Enheter som allerede er av blir ikke slått på ved slutt.
