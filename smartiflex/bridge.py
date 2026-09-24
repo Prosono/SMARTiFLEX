@@ -21,7 +21,7 @@ logger = logging.getLogger("smartiflex.bridge")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -526,7 +526,7 @@ async def _synchronize():
                 payload = reply.json()
                 active = payload.get("active_dispatch_ids")
                 runtime.update(cloud_control_enabled=payload.get("physical_control_enabled") is True and isinstance(active, list),
-                    active_dispatch_ids=active if isinstance(active, list) else [], control_lease_at=utcnow().isoformat())
+                    active_dispatch_ids=active if isinstance(active, list) else [], market_dispatch_ids=payload.get("market_dispatch_ids", []), control_lease_at=utcnow().isoformat())
                 permissions = {d["id"]: d for d in payload["devices"]}
                 runtime["connection_status"] = payload.get("connection_status")
                 for b in state["bindings"]:
@@ -748,7 +748,7 @@ async def status():
     async with state_lock:
         state = load_state()
         journal = load_control()
-        controls = [{"device_id": c.get("device_id"), "local_id": c.get("local_id"), "status": c["state"], "expires_at": c.get("expires_at"), "error": c.get("local_error"), "restore_attempts": c.get("restore_attempts", 0), "restore_next_attempt_at": c.get("restore_next_attempt_at")} for c in journal["commands"].values() if c["state"] not in ("RESTORED", "REJECTED")]
+        controls = [{"market_active": bool(command_id in runtime.get("market_dispatch_ids", []) and command_id in runtime.get("active_dispatch_ids", []) and cloud_control_current() and c["state"] == "ACTIVE" and not c.get("local_error") and parse_time(c["expires_at"]) > utcnow()), "device_id": c.get("device_id"), "local_id": c.get("local_id"), "status": c["state"], "expires_at": c.get("expires_at"), "error": c.get("local_error"), "restore_attempts": c.get("restore_attempts", 0), "restore_next_attempt_at": c.get("restore_next_attempt_at")} for command_id, c in journal["commands"].items() if c["state"] not in ("RESTORED", "REJECTED")]
         return {**runtime, "version": VERSION, "paired": bool(state.get("token")), "cloud_url": state.get("cloud_url"), "bindings": state["bindings"], "physical_control_enabled": cloud_control_current(), "controls": controls, "pending_control_results": len(journal["outbox"])}
 
 

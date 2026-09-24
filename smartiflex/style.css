@@ -26,3 +26,10 @@ dialog{color:var(--text);background:var(--panel);border:1px solid var(--line);bo
 
 .control-ring .device-tile-status{color:var(--control-color)}
 #connection{display:grid;gap:6px}#connection strong{font-size:16px}#connection>span{color:#bdb7c9;font-size:13px}
+/* Active market dispatch is distinct from ordinary green readiness. */
+.device-tile.market-controlling{border:2px solid #71e6a2!important;background:linear-gradient(145deg,#18362855,#111120 70%);animation:market-control-pulse 2.8s ease-in-out infinite}
+.device-tile.market-controlling::after{animation:none;background:none}
+.market-active-label{font-size:14px;font-weight:750;color:#91f2b9!important;line-height:1.5}
+.market-until{color:#c4ead1;font-size:13px;line-height:1.5}
+@keyframes market-control-pulse{0%,100%{box-shadow:0 0 0 0 #71e6a230,0 0 10px #71e6a214}50%{box-shadow:0 0 0 5px #71e6a208,0 0 22px #71e6a23a}}
+@media(prefers-reduced-motion:reduce){.device-tile.market-controlling{animation:none;box-shadow:0 0 0 2px #71e6a225}}

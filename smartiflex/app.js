@@ -112,8 +112,11 @@ function renderBindings(){
     const actual=document.createElement('small');actual.textContent=haStatus(b.ha_status);
     copy.append(name,category,status,actual,duration,diagnostic,reading,raw);
     const control=(snapshot.controls||[]).find(c=>c.local_id===b.local_id);
+    const marketActive=control?.market_active===true && Date.parse(control.expires_at)>Date.now();
+    const marketLabel='Styres nå av fleksmarkedet';
     const controlStatus=document.createElement('small');controlStatus.className='control-status';
     controlStatus.textContent=control?.error || (control?`Styring pågår · tilbake senest ${new Date(control.expires_at).toLocaleTimeString('nb-NO')}`:['switch','climate'].includes(b.entity_id?.split('.')[0])?'Styring følger tillatelsene i SMARTi Flex. Tidligere tilstand gjenopprettes ved slutt.':'Styring av denne enhetstypen støttes ikke ennå. Målinger deles.');
+    if(marketActive)controlStatus.textContent=`${marketLabel} · holdes avslått til ${new Date(control.expires_at).toLocaleTimeString('nb-NO',{hour:'2-digit',minute:'2-digit'})}. Tidligere tilstand gjenopprettes etterpå.`;
     if(control?.error){
       controlStatus.classList.add('control-fault');
       if(control.restore_attempts)controlStatus.textContent+=` · ${control.restore_attempts} tilbakeføringsforsøk`;
@@ -132,15 +135,18 @@ function renderBindings(){
     actions.append(permissionButton,edit,remove);
     row.append(copy,actions);
     const tile=document.createElement('button');tile.className='device-tile control-ring';const shared=controlState(b);tile.dataset.control=shared.color;tile.dataset.id=b.local_id;tile.setAttribute('aria-haspopup','dialog');tile.setAttribute('aria-label',b.name+' – åpne innstillinger');
+    if(marketActive){tile.classList.add('market-controlling');tile.dataset.control='green';tile.setAttribute('aria-label',b.name+' – '+marketLabel+' – åpne innstillinger');}
     const top=document.createElement('span');top.className='device-tile-top';const arrow=document.createElement('span');arrow.textContent='↗';arrow.setAttribute('aria-hidden','true');top.append(deviceIcon(b.kind),arrow);
     const kind=document.createElement('span');kind.className='device-tile-kind';kind.textContent=deviceKinds[b.kind]||'Enhet';
     const title=document.createElement('strong');title.className='device-tile-name';title.textContent=b.name;
     const state=document.createElement('span');state.className='device-tile-status';
     const recentUpload=b.last_upload_at && Date.now()-Date.parse(b.last_upload_at)<120000;
     state.textContent='● '+shared.label;state.title=shared.reason;copy.append(Object.assign(document.createElement('p'),{textContent:shared.reason}));
+    if(marketActive){state.textContent='● '+marketLabel;state.classList.add('market-active-label');state.title=controlStatus.textContent;}
     const bottom=document.createElement('span');bottom.className='device-tile-bottom';
     const power=document.createElement('span');const label=document.createElement('small');label.textContent='Siste kjente effekt';const value=document.createElement('strong');value.textContent=typeof b.last_power_w==='number'&&Number.isFinite(b.last_power_w)?(b.last_power_w/1000).toLocaleString('nb-NO',{maximumFractionDigits:3})+' kW':'–';power.append(label,value);
     const hint=document.createElement('span');hint.className='device-tile-hint';hint.textContent='Innstillinger';bottom.append(power,hint);tile.append(top,kind,title,state,Object.assign(document.createElement('small'),{textContent:shared.reason}),actual.cloneNode(true),bottom);
+    if(marketActive){const until=document.createElement('span');until.className='market-until';until.textContent='Holdes avslått til '+new Date(control.expires_at).toLocaleTimeString('nb-NO',{hour:'2-digit',minute:'2-digit'});tile.insertBefore(until,bottom);}
     tile.onclick=()=>{openedDevice=b.local_id;$('#dialog-feedback').hidden=true;$('#device-dialog-title').textContent=b.name;$('#device-details').replaceChildren(row);$('#device-dialog').showModal();};
     $('#bindings').append(tile);
     if(focusedTile===b.local_id)tile.focus();
