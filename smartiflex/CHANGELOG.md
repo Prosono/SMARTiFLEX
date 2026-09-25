@@ -1,3 +1,10 @@
+# 0.9.4
+
+- Automatisk statusoppdatering hvert tredje sekund mens appen er synlig.
+- Henter status straks fanen åpnes igjen eller nettforbindelsen kommer tilbake.
+- Hindrer at eldre svar overskriver nyere status; status hentes uten nettlesercache.
+- Tidsavbrudd og automatisk nytt forsøk ved nettfeil.
+
 # 0.9.3
 
 - Holder pågående aktivering gjennom nettbrudd og omstart frem til avtalt slutt.

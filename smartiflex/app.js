@@ -8,7 +8,7 @@ const words = value => new Set(value.toLocaleLowerCase('nb-NO').replace(/[_.-]/g
 function score(a,b) { const tokens=words(a.name+' '+a.entity_id); return [...words(b.name+' '+b.entity_id)].filter(w=>tokens.has(w)).length; }
 function message(text, error=false) { const el=$(error?'#error':'#notice'); el.textContent=text; el.hidden=!text; if ($('#device-dialog').open) { const feedback=$('#dialog-feedback'); feedback.textContent=text; feedback.hidden=!text; feedback.className=error?'feedback-error':''; } }
 async function request(path,method='GET',body) {
-  const r=await fetch('./'+path,{method,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:body===undefined?undefined:JSON.stringify(body)});
+  const r=await fetch('./'+path,{method,cache:'no-store',...(method==='GET'?{signal:AbortSignal.timeout(10000)}:{}),headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:body===undefined?undefined:JSON.stringify(body)});
   const data=await r.json().catch(()=>null);
   if(!r.ok) throw Error(typeof data?.detail==='string'?data.detail:'Dette gikk ikke. Prøv igjen.');
   return data;
@@ -158,8 +158,12 @@ function renderBindings(){
     }
   }
 }
+let refreshSequence=0;
 async function refresh(){
-  snapshot=await request('status');$('#loading').hidden=true;$('#setup').hidden=snapshot.paired;$('#connected').hidden=!snapshot.paired;
+  const sequence=++refreshSequence;
+  const latest=await request('status');
+  if(sequence!==refreshSequence)return;
+  snapshot=latest;$('#loading').hidden=true;$('#setup').hidden=snapshot.paired;$('#connected').hidden=!snapshot.paired;
   const online=snapshot.connection==='ONLINE'&&Date.now()-Date.parse(snapshot.last_sync)<45000;
   const limited=snapshot.bindings.some(b=>controlState(b).color!=='green');
   const heading=document.createElement('strong');heading.textContent=online?(limited?'SMARTi Flex – Begrenset tilkobling':'SMARTi Flex – Tilkoblet'):'SMARTi Flex – Frakoblet';const detail=document.createElement('span');detail.textContent=online?(limited?'Én eller flere enheter kan ikke styres.':'Alle systemer fungerer normalt.'):'Ingen forbindelse til SMARTi Flex.';$('#connection').replaceChildren(heading,detail);
@@ -177,7 +181,21 @@ $('#next').onclick=()=>{
 $('#pair').onsubmit=e=>{e.preventDefault();const form=e.currentTarget;void action(async()=>{await request('pair','POST',Object.fromEntries(new FormData(form)));form.reset();await refresh();message('Du er koblet til. Legg til den første enheten din.');});};
 $('#disconnect').onclick=()=>{if(confirm('Fjerne tilkoblingen og de lokale enhetskoblingene? Trekk også tilbake tilgangen i SMARTi-portalen.'))void action(async()=>{await request('disconnect','POST');close();await refresh();});};
 void refresh().catch(e=>{message(e.message,true);$('#loading').textContent='Kunne ikke hente status. Last siden på nytt.';});
-setInterval(()=>{if(!pending&&!document.hidden)void refresh().catch(()=>message('Kunne ikke oppdatere status. Kontroller forbindelsen.',true));},15000);
+let autoRefreshing=false;
+async function updateVisibleStatus(){
+  if(pending||document.hidden||autoRefreshing)return;
+  autoRefreshing=true;
+  try {
+    await refresh();
+    if($('#error').textContent==='Kunne ikke oppdatere status. Prøver igjen automatisk.')message('',true);
+  }
+  catch { message('Kunne ikke oppdatere status. Prøver igjen automatisk.',true); }
+  finally { autoRefreshing=false; }
+}
+setInterval(()=>void updateVisibleStatus(),3000);
+document.addEventListener('visibilitychange',()=>void updateVisibleStatus());
+window.addEventListener('focus',()=>void updateVisibleStatus());
+window.addEventListener('online',()=>void updateVisibleStatus());
 
 function haStatus(status){
   if(!status)return 'Enhetsstatus venter på Home Assistant';
