@@ -33,3 +33,15 @@ dialog{color:var(--text);background:var(--panel);border:1px solid var(--line);bo
 .market-until{color:#c4ead1;font-size:13px;line-height:1.5}
 @keyframes market-control-pulse{0%,100%{box-shadow:0 0 0 0 #71e6a230,0 0 10px #71e6a214}50%{box-shadow:0 0 0 5px #71e6a208,0 0 22px #71e6a23a}}
 @media(prefers-reduced-motion:reduce){.device-tile.market-controlling{animation:none;box-shadow:0 0 0 2px #71e6a225}}
+
+/* Customer help, available before and after pairing. */
+.user-help { max-width: 850px; }
+.user-help details { border-bottom: 1px solid #343440; padding: 18px 0; }
+.user-help summary { cursor: pointer; font-weight: 600; line-height: 1.6; }
+.user-help details p { color: #c6c3ce; line-height: 1.8; max-width: 74ch; margin: 12px 0 2px; }
+.user-help summary:focus-visible, .context-help > summary:focus-visible { outline: 2px solid #ff9d52; outline-offset: 5px; }
+.context-help { margin: 0 0 24px; }
+.context-help > summary { color: #ffac6c; cursor: pointer; padding: 8px 0; }
+.help-search { display: grid; gap: 10px; margin-top: 24px; }
+.help-search input { width: 100%; padding: 12px; border: 1px solid #565360; border-radius: 8px; background: #141421; color: #f4f1f5; }
+.help-count { font-size: 13px; color: #b5b0c0; }
