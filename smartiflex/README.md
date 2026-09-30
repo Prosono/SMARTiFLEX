@@ -62,3 +62,13 @@ The local UI's Stop and Pause actions request restoration promptly even during a
 Validation uses fake HA state/service adapters and an in-process App → SMARTi API round trip, including cancellation, expired leases, retry, restart, pause, manual override and restore failure. No actual household switches were operated during development. A real Supervisor installation still needs validation before enabling the pilot.
 
 Service integration follows [Home Assistant's REST API](https://developers.home-assistant.io/docs/api/rest/) and its service-call returned states. The App remains a single-process service; do not start multiple workers sharing its local journal.
+
+## 0.9.6 — light and dark themes
+
+The ingress UI follows the current Home Assistant user's effective light/dark
+mode, including changes while the app is open. Standalone or cross-origin
+embedding falls back to the operating-system preference. Theme detection reads
+only `home-assistant.hass.themes.darkMode` from a same-origin parent and never
+changes HA settings. Device permissions, pairing and control journals are unchanged.
+
+Update the SMARTi Flex app from Home Assistant's app store to install this version.

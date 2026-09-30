@@ -26,7 +26,7 @@ logger.propagate = False
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.9.5"
+VERSION = "0.9.6"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -773,6 +773,11 @@ def logo():
 @app.get("/app.js")
 def script():
     return FileResponse(Path(__file__).with_name("app.js"), media_type="text/javascript")
+
+
+@app.get("/theme.js")
+async def theme_script():
+    return FileResponse(Path(__file__).with_name("theme.js"), media_type="text/javascript")
 
 
 @app.get("/style.css")
