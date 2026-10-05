@@ -64,7 +64,7 @@ async function start(binding=null){
         const duration=$('#duration');
         if(![...duration.options].some(o=>Number(o.value)===binding.max_duration_seconds))duration.add(new Option(`${binding.max_duration_seconds/60} minutter`,String(binding.max_duration_seconds)));
         duration.value=String(binding.max_duration_seconds);
-        $('#power-help').textContent='Ditt lagrede effektanslag. Du kan endre det her.';
+        $('#power-help').textContent='Din oppgitte maksimale effekt. Endringer sendes automatisk til SMARTi Flex og NODES.';
       }else{$('#duration').value='3600';}
       $('#edit-note').hidden=!binding;
       drawChoices();showStep(1);
@@ -163,7 +163,7 @@ async function refresh(){
   const sequence=++refreshSequence;
   const latest=await request('status');
   if(sequence!==refreshSequence)return;
-  snapshot=latest;$('#loading').hidden=true;$('#setup').hidden=snapshot.paired;$('#connected').hidden=!snapshot.paired;
+  snapshot=latest;$('#retained-devices').hidden=snapshot.paired||!snapshot.bindings.length;$('#retained-devices').textContent=`Oppsettet for ${snapshot.bindings.length} enheter er bevart. Koble til samme anlegg i SMARTi-portalen for å gjenoppta tilkoblingen.`;$('#loading').hidden=true;$('#setup').hidden=snapshot.paired;$('#connected').hidden=!snapshot.paired;
   const online=snapshot.connection==='ONLINE'&&Date.now()-Date.parse(snapshot.last_sync)<45000;
   const limited=snapshot.bindings.some(b=>controlState(b).color!=='green');
   const heading=document.createElement('strong');heading.textContent=online?(limited?'SMARTi Flex – Begrenset tilkobling':'SMARTi Flex – Tilkoblet'):'SMARTi Flex – Frakoblet';const detail=document.createElement('span');detail.textContent=online?(limited?'Én eller flere enheter kan ikke styres.':'Alle systemer fungerer normalt.'):'Ingen forbindelse til SMARTi Flex.';$('#connection').replaceChildren(heading,detail);
@@ -173,13 +173,13 @@ async function refresh(){
 $('#add').onclick=()=>start();$('#cancel').onclick=close;$('#back').onclick=()=>showStep(step-1);
 $('#device-search').oninput=drawChoices;$('#sensor-search').oninput=drawChoices;$('#confirm').onchange=controls;
 $('#next').onclick=()=>{
-  if(step<3){if(step===2&&!editing){$('#device-name').value=device.name;$('#power').value='0';$('#power-help').textContent='Ukjent maks? Behold 0. SMARTi lærer effekten fra 24 timer med målinger før styring.';}showStep(step+1);return;}
+  if(step<3){if(step===2&&!editing){$('#device-name').value=device.name;$('#power').value='';$('#power-help').textContent='Oppgi maksimal effekt fra merkeskilt eller produktinformasjon, i watt.';}showStep(step+1);return;}
   const name=$('#device-name'),power=$('#power');if(!name.reportValidity()||!$('#device-kind').reportValidity()||!power.reportValidity())return;
   if(!name.value.trim()){message('Gi enheten et navn.',true);name.focus();return;}
   void action(async()=>{await request(editing?'bindings/'+editing.local_id+'/edit':'bindings','POST',{entity_id:device.entity_id,power_entity:sensor.entity_id,name:name.value.trim(),kind:$('#device-kind').value,estimated_w:Number(power.value)||0,reporting_mode:$('#reporting-mode').value,max_duration_seconds:Number($('#duration').value),control_consent:$('#control-consent').checked});close();await refresh();message(`${name.value.trim()} er ${editing?'oppdatert':'lagt til'}. Tillatelsen synkroniseres automatisk med SMARTi Flex.`);});
 };
-$('#pair').onsubmit=e=>{e.preventDefault();const form=e.currentTarget;void action(async()=>{await request('pair','POST',Object.fromEntries(new FormData(form)));form.reset();await refresh();message('Du er koblet til. Legg til den første enheten din.');});};
-$('#disconnect').onclick=()=>{if(confirm('Fjerne tilkoblingen og de lokale enhetskoblingene? Trekk også tilbake tilgangen i SMARTi-portalen.'))void action(async()=>{await request('disconnect','POST');close();await refresh();});};
+$('#pair').onsubmit=e=>{e.preventDefault();const form=e.currentTarget;void action(async()=>{await request('pair','POST',Object.fromEntries(new FormData(form)));form.reset();await refresh();message(snapshot.bindings.length?'Du er koblet til igjen. Enhetene og oppsettet er bevart. Kontroller styringstillatelsene.':'Du er koblet til. Legg til den første enheten din.');});};
+$('#disconnect').onclick=()=>{if(confirm('Koble fra SMARTi Flex? Måledeling og styring stoppes. Enhetene og oppsettet beholdes når du kobler til samme anlegg igjen. Trekk også tilbake tilgangen i SMARTi-portalen.'))void action(async()=>{await request('disconnect','POST');close();await refresh();});};
 void refresh().catch(e=>{message(e.message,true);$('#loading').textContent='Kunne ikke hente status. Last siden på nytt.';});
 let autoRefreshing=false;
 async function updateVisibleStatus(){

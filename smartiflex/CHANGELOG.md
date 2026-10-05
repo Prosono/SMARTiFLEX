@@ -1,3 +1,10 @@
+## 0.9.8
+
+- Maksimal effekt i watt er påkrevd ved oppretting og redigering.
+- Oppgitt effekt synkroniseres som installert effekt gjennom Flex til NODES.
+- Tydelig skille mellom oppgitt effekt, sanntidsmålinger og løpende planleggingsestimat.
+- Inkluderer 0.9.7: behold enhetsoppsett ved frakobling, kontroller riktig installasjon ved ny paring og håndter fjerning fra portalen etter trygg tilbakeføring.
+
 # 0.9.4
 
 - Automatisk statusoppdatering hvert tredje sekund mens appen er synlig.
@@ -132,3 +139,11 @@
 - Lokal pause, samtykkekontroll og varighetsgrenser.
 - Persistente kvitteringer for kommunikasjonstester uten fysisk styring.
 - SMARTi-logo og mørkt/oransje brukergrensesnitt.
+
+## 0.9.7
+- Bevar enheter, sensorkoblinger og oppsett ved lokal frakobling.
+- Koble til samme installasjon igjen uten nye enhets-ID-er; avvis kode for feil anlegg.
+- Vis at oppsettet er bevart, og forklar frakobling uten sletting.
+- Motta fjerning fra Flex-nettappen og behold lokal kobling til tilbakeføring er bekreftet.
+- Bevar kontrolljournal og ventende tilbakekallinger; ikke gjenopprett usendte samtykker.
+- Krever oppdatert Flex-server (utrullet 3. oktober 2026).

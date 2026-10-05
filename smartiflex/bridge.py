@@ -26,7 +26,7 @@ logger.propagate = False
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.9.6"
+VERSION = "0.9.8"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -569,6 +569,11 @@ async def _synchronize():
                 for b in state["bindings"]:
                     permission = permissions.get(b.get("device_id"))
                     if permission:
+                        if permission.get("constraints", {}).get("portal_removed"):
+                            b.update(pending_remove=True, local_enabled=False,
+                                physical_control_enabled=False, control_consent=False)
+                            b.pop("pending_consent", None)
+                            b.pop("needs_sync", None)
                         b["portal_consent"] = permission
                         b["control_status"] = permission.get("control_status")
                         if not b.get("pending_consent") and not b.get("needs_sync"):
@@ -583,6 +588,9 @@ async def _synchronize():
             for binding in list(state["bindings"]):
                 try:
                     if binding.get("pending_remove"):
+                        if any(c.get("local_id") == binding["local_id"] and c["state"] not in ("RESTORED", "REJECTED") for c in load_control()["commands"].values()):
+                            # Keep the binding available to the restoration watchdog.
+                            continue
                         if binding.get("device_id"):
                             response = await client.post(f"/api/agent/devices/{binding['device_id']}/disconnect")
                             response.raise_for_status()
@@ -590,12 +598,12 @@ async def _synchronize():
                         save_state(state)
                         continue
                     if not binding.get("device_id"):
-                        response = await client.post("/api/agent/devices", json={**{k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w")}, "control_consent": binding.get("control_consent", False), "max_duration_seconds": binding["max_duration_seconds"]})
+                        response = await client.post("/api/agent/devices", json={**{k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w")}, "control_consent": binding.get("control_consent", False), "max_duration_seconds": binding["max_duration_seconds"], **({"installed_w": binding["estimated_w"]} if binding.get("estimated_w", 0) > 0 else {})})
                         response.raise_for_status()
                         binding["device_id"] = response.json()["id"]
                         save_state(state)
                     if binding.get("needs_sync"):
-                        response = await client.post(f"/api/agent/devices/{binding['device_id']}/configuration", json={**{k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w") }, "revision": binding["revision"], "control_consent": binding.get("control_consent", False), "max_duration_seconds": binding["max_duration_seconds"]})
+                        response = await client.post(f"/api/agent/devices/{binding['device_id']}/configuration", json={**{k: binding[k] for k in ("local_id", "name", "kind", "capabilities", "estimated_w") }, "revision": binding["revision"], "control_consent": binding.get("control_consent", False), "max_duration_seconds": binding["max_duration_seconds"], **({"installed_w": binding["estimated_w"]} if binding.get("estimated_w", 0) > 0 else {})})
                         response.raise_for_status()
                         binding["needs_sync"] = False
                         blocked_local_ids.discard(binding["local_id"])
@@ -811,11 +819,14 @@ async def pair(body: PairRequest):
             raise HTTPException(409, "Koble fra den eksisterende installasjonen først")
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
             try:
-                response = await client.post(base + "/api/agent/pair", json={"code": body.code})
+                payload = {"code": body.code}
+                if state.get("installation_id"):
+                    payload["expected_installation_id"] = state["installation_id"]
+                response = await client.post(base + "/api/agent/pair", json=payload)
                 response.raise_for_status()
             except httpx.HTTPStatusError as error:
                 if error.response.status_code == 401:
-                    raise HTTPException(400, "Engangskoden er ugyldig eller utløpt. Lag en ny kode i SMARTi-portalen.")
+                    raise HTTPException(400, "Engangskoden er ugyldig, utløpt eller tilhører et annet anlegg. Lag en ny kode for det opprinnelige anlegget i SMARTi-portalen. Enhetsoppsettet er bevart.")
                 if error.response.status_code == 429:
                     raise HTTPException(429, "For mange tilkoblingsforsøk. Vent ett minutt og prøv igjen.")
                 raise HTTPException(400, "Serveren avviste tilkoblingen. Kontroller at adressen går til SMARTi-backenden, ikke Home Assistant.")
@@ -827,6 +838,9 @@ async def pair(body: PairRequest):
                 raise ValueError()
         except (ValueError, TypeError):
             raise HTTPException(400, "Adressen svarte, men ikke som en SMARTi-backend. Kontroller serveradressen.")
+        if state.get("installation_id") and paired["installation_id"] != state["installation_id"]:
+            # Also protect retained bindings when an older server ignores the guard.
+            raise HTTPException(409, "Koden tilhører et annet anlegg. Bruk det opprinnelige anlegget for å beholde enhetsoppsettet.")
         state.update(cloud_url=base, token=paired["token"], installation_id=paired["installation_id"])
         save_state(state)
         return {"paired": True}
@@ -837,7 +851,16 @@ async def disconnect():
     runtime.update(cloud_control_enabled=False, active_dispatch_ids=[], control_lease_at=None)
     await restore_pending(force=True)
     async with state_lock:
-        save_state({"bindings": [], "processed": {}})
+        state = load_state()
+        state.pop("token", None)
+        for binding in state["bindings"]:
+            # Never replay an unsent grant after disconnect/revocation. Keep IDs,
+            # sensors, configuration and command history for the same installation.
+            if binding.get("pending_consent", {}).get("enabled"):
+                binding.pop("pending_consent", None)
+            binding.pop("portal_consent", None)
+            binding.update(control_consent=False, physical_control_enabled=False)
+        save_state(state)
         runtime.update(connection="UNKNOWN", last_sync=None, error=None)
     return {"ok": True}
 
@@ -867,7 +890,7 @@ class BindingRequest(BaseModel):
     entity_id: str = Field(max_length=200)
     power_entity: str = Field(max_length=200)
     name: str = Field(min_length=1, max_length=120)
-    estimated_w: int = Field(ge=0, le=1_000_000)
+    estimated_w: int = Field(ge=1, le=1_000_000)
     max_duration_seconds: int = Field(ge=30, le=3600)
 
 
