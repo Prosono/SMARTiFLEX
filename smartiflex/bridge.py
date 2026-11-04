@@ -26,7 +26,8 @@ logger.propagate = False
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.9.8"
+VERSION = "0.9.10"
+CLOUD_URL = "https://flex.smarti.dev"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
 control_lock = asyncio.Lock()
@@ -803,16 +804,12 @@ async def status():
 
 
 class PairRequest(BaseModel):
-    cloud_url: str = Field(max_length=300)
     code: str = Field(min_length=30, max_length=128)
 
 
 @app.post("/pair")
 async def pair(body: PairRequest):
-    try:
-        base = cloud_url(body.cloud_url)
-    except ValueError as error:
-        raise HTTPException(422, str(error))
+    base = CLOUD_URL
     async with state_lock:
         state = load_state()
         if state.get("token"):
@@ -829,15 +826,15 @@ async def pair(body: PairRequest):
                     raise HTTPException(400, "Engangskoden er ugyldig, utløpt eller tilhører et annet anlegg. Lag en ny kode for det opprinnelige anlegget i SMARTi-portalen. Enhetsoppsettet er bevart.")
                 if error.response.status_code == 429:
                     raise HTTPException(429, "For mange tilkoblingsforsøk. Vent ett minutt og prøv igjen.")
-                raise HTTPException(400, "Serveren avviste tilkoblingen. Kontroller at adressen går til SMARTi-backenden, ikke Home Assistant.")
+                raise HTTPException(400, "SMARTi Flex avviste tilkoblingen. Kontroller engangskoden og prøv igjen.")
             except httpx.HTTPError:
-                raise HTTPException(400, "SMARTi-backenden kunne ikke nås over HTTPS. Kontroller at serveren eller testtunnelen kjører og er tilgjengelig fra Home Assistant.")
+                raise HTTPException(400, "Kunne ikke nå SMARTi Flex. Kontroller internettforbindelsen og prøv igjen.")
         try:
             paired = response.json()
             if not isinstance(paired, dict) or not all(isinstance(paired.get(k), str) and paired[k] for k in ("token", "installation_id")):
                 raise ValueError()
         except (ValueError, TypeError):
-            raise HTTPException(400, "Adressen svarte, men ikke som en SMARTi-backend. Kontroller serveradressen.")
+            raise HTTPException(400, "SMARTi Flex svarte ikke som forventet. Prøv igjen senere.")
         if state.get("installation_id") and paired["installation_id"] != state["installation_id"]:
             # Also protect retained bindings when an older server ignores the guard.
             raise HTTPException(409, "Koden tilhører et annet anlegg. Bruk det opprinnelige anlegget for å beholde enhetsoppsettet.")

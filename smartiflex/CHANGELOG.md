@@ -1,3 +1,10 @@
+## 0.9.10
+
+- «Åpne min side» åpner https://flex.smarti.dev i en ny fane.
+- Nye tilkoblinger bruker fast serveradresse; bare engangskoden må fylles inn.
+- Eksisterende tilkoblinger og enhetsoppsett beholdes.
+- Oppdatert hjelp og feilmeldinger for produksjon.
+
 ## 0.9.8
 
 - Maksimal effekt i watt er påkrevd ved oppretting og redigering.

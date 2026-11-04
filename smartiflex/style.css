@@ -49,3 +49,6 @@ dialog{color:var(--text);background:var(--panel);border:1px solid var(--line);bo
 /* Ingress follows the Home Assistant user's effective theme. */
 :root[data-theme=light] {color-scheme:light;--bg:#f7f6f3;--panel:#fffdfa;--text:#242131;--muted:#625c70;--line:#d4cfd9;--focus:#a84b00}
 @media(prefers-color-scheme:light){:root:not([data-theme]){color-scheme:light;--bg:#f7f6f3;--panel:#fffdfa;--text:#242131;--muted:#625c70;--line:#d4cfd9;--focus:#a84b00}}
+
+/* Portal access remains available before and after pairing. */
+.brand{flex-wrap:wrap}.portal-link{margin-left:auto;display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:8px 14px;border:1px solid var(--line);border-radius:7px;color:var(--text);font-size:14px;font-weight:600;text-decoration:none}.portal-link:hover{border-color:var(--orange)}.portal-link:focus-visible{outline:2px solid var(--focus);outline-offset:4px}@media(max-width:420px){.portal-link{margin-left:0}}
