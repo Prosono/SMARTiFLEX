@@ -72,3 +72,18 @@ only `home-assistant.hass.themes.darkMode` from a same-origin parent and never
 changes HA settings. Device permissions, pairing and control journals are unchanged.
 
 Update the SMARTi Flex app from Home Assistant's app store to install this version.
+
+## 0.9.11 — automatisk sensoroppsett og effektvalg
+
+Appen vurderer automatisk om effektsensoren rapporterer regelmessig eller bare
+ved endringer. Den følger rapporteringstid og verdiendring hver for seg, og
+bekrefter vellykkede HA-avlesninger separat. Eldre lagrede modusvalg erstattes av
+automatisk vurdering ved oppretting/redigering; tilgjengelige målinger beholdes.
+
+Bruk skyveknappen eller wattfeltet for maksimal effekt. Forslaget bruker
+maksimal tilgjengelig effekt fra sensorens HA-historikk siste 365 dager; der
+historikk mangler må effekten fortsatt oppgis. Eksisterende bekreftet effekt
+beholdes når samme sensor redigeres. Endret effekt sendes videre til Flex/NODES.
+
+Nytt ikon og logo har SMARTi-symbolet, teksten FLEX og gjennomsiktig bakgrunn.
+HA-sidepanelets menyikon bruker fortsatt Home Assistants MDI-ikonsystem.

@@ -1,3 +1,10 @@
+## 0.9.11
+
+- Oppdateringsmåten for effektsensoren oppdages automatisk. Brukeren trenger ikke velge mellom regelmessig rapportering og verdiendringer.
+- Effekten velges med en skyveknapp eller et nøyaktig wattfelt. Tilgjengelig sensorhistorikk foreslår maksimal effekt som brukeren kan kontrollere.
+- Uendrede verdier bekreftes med eget avlesningstidspunkt uten å gjøre gammel måletid ny.
+- Nytt gjennomsiktig SMARTi-ikon med FLEX under symbolet.
+
 ## 0.9.10
 
 - «Åpne min side» åpner https://flex.smarti.dev i en ny fane.
@@ -154,3 +161,4 @@
 - Motta fjerning fra Flex-nettappen og behold lokal kobling til tilbakeføring er bekreftet.
 - Bevar kontrolljournal og ventende tilbakekallinger; ikke gjenopprett usendte samtykker.
 - Krever oppdatert Flex-server (utrullet 3. oktober 2026).
+

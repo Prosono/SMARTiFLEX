@@ -26,7 +26,7 @@ logger.propagate = False
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "state.json"
 CSRF = secrets.token_urlsafe(32)
-VERSION = "0.9.10"
+VERSION = "0.9.11"
 CLOUD_URL = "https://flex.smarti.dev"
 runtime = {"connection": "UNKNOWN", "last_sync": None, "error": None, "cloud_control_enabled": False, "active_dispatch_ids": [], "control_lease_at": None}
 state_lock = asyncio.Lock()
@@ -158,6 +158,91 @@ def power_sample(entity, max_age=45, hold=False):
         return {"power_w": watts, "observed_at": observed.isoformat(), **({"checked_at": utcnow().isoformat()} if hold else {})}
     except (KeyError, ValueError, InvalidOperation, TypeError, AttributeError):
         return None
+
+
+def reporting_mode(entity, previous=None):
+    """Infer reports vs value changes, never use elapsed time to infer cadence.
+
+    A periodic sensor can stall, and an on-change sensor can change just now.
+    Classification is diagnostic only; measurement freshness is checked separately.
+    Older HA integrations may not supply enough evidence yet.
+    """
+    previous = previous or {}
+    try:
+        observed = parse_time(entity.get('last_reported') or entity['last_updated'])
+        changed = parse_time(entity['last_changed']) if entity.get('last_changed') else None
+        updated = parse_time(entity['last_updated']) if entity.get('last_updated') else None
+        if observed > utcnow() + timedelta(seconds=10):
+            return 'unknown'
+        # last_reported also advances when HA receives the same value again.
+        if (updated and observed > updated) or (changed and observed > changed):
+            return 'periodic'
+        previous_observed = previous.get('sensor_observed_at')
+        if previous_observed and observed > parse_time(previous_observed):
+            if Decimal(entity['state']) == Decimal(previous['sensor_state']):
+                return 'periodic'
+        if previous.get('detected_reporting_mode') == 'periodic':
+            return 'periodic'
+        if changed and observed == changed:
+            return 'on_change'
+    except (KeyError, TypeError, ValueError, AttributeError, InvalidOperation):
+        pass
+    return previous.get('detected_reporting_mode', 'unknown')
+
+
+def sensor_observation(entity, previous=None):
+    """Keep physical state changes distinct from HA reports and bridge checks."""
+    previous = previous or {}
+    observed = entity.get('last_reported') or entity.get('last_updated')
+    changed = previous.get('sensor_value_changed_at')
+    try:
+        if entity.get('last_changed') and parse_time(entity['last_changed']) <= parse_time(observed):
+            changed = parse_time(entity['last_changed']).isoformat()
+        elif previous.get('sensor_state') is not None and Decimal(entity['state']) != Decimal(previous['sensor_state']):
+            changed = parse_time(observed).isoformat()
+    except (KeyError, TypeError, ValueError, AttributeError, InvalidOperation):
+        pass
+    return {'reporting_mode': 'auto', 'detected_reporting_mode': reporting_mode(entity, previous),
+            'sensor_state': str(entity.get('state', 'ukjent'))[:100],
+            'sensor_unit': entity.get('attributes', {}).get('unit_of_measurement', ''),
+            'sensor_observed_at': observed, 'sensor_value_changed_at': changed}
+
+
+async def sensor_insight(entity_id):
+    entities = {e['entity_id']: e for e in await ha_states()}
+    entity = entities.get(entity_id)
+    if not entity or entity.get('attributes', {}).get('unit_of_measurement') not in ('W', 'kW'):
+        raise HTTPException(422, 'Velg en effektsensor i W eller kW.')
+    end = utcnow()
+    start = end - timedelta(days=365)
+    result = {'reporting_mode': reporting_mode(entity), 'suggested_w': None,
+              'period_from': start.isoformat(), 'period_to': end.isoformat(), 'periods': 0,
+              'message': 'Ingen egnet historikk. Oppgi maksimal effekt manuelt.'}
+    token = os.getenv('SUPERVISOR_TOKEN')
+    if not token:
+        return result
+    try:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
+            response = await client.post('http://supervisor/core/api/services/recorder/get_statistics',
+                params={'return_response': ''}, headers={'Authorization': f'Bearer {token}'},
+                json={'statistic_ids': [entity_id], 'start_time': start.isoformat(), 'end_time': end.isoformat(),
+                      'period': 'day', 'types': ['max'], 'units': {'power': 'W'}})
+            response.raise_for_status()
+            rows = response.json().get('service_response', {}).get('statistics', {}).get(entity_id, [])
+        values = []
+        for row in rows:
+            value = row.get('max')
+            if value is None or isinstance(value, bool):
+                continue
+            value = Decimal(str(value))
+            if value.is_finite() and 0 < value <= 1_000_000:
+                values.append(value)
+        if values:
+            result.update(suggested_w=int(max(values).to_integral_value(rounding='ROUND_CEILING')),
+                          periods=len(values), message='Forslag fra høyeste registrerte effekt i tilgjengelig historikk siste 365 dager. Kontroller før du lagrer; dette er ikke nødvendigvis merkeskilteffekt.')
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError, InvalidOperation):
+        result['message'] = 'Kunne ikke hente egnet langtidshistorikk. Oppgi maksimal effekt manuelt.'
+    return result
 
 
 def measurement_status(entity):
@@ -640,12 +725,11 @@ async def _synchronize():
                         binding["measurement_status"] = "Deling er pauset lokalt."
                         continue
                     entity = entities.get(binding["power_entity"], {})
-                    binding["sensor_state"] = str(entity.get("state", "ukjent"))[:100]
-                    binding["sensor_unit"] = entity.get("attributes", {}).get("unit_of_measurement", "")
-                    binding["sensor_observed_at"] = entity.get("last_reported") or entity.get("last_updated")
-                    # Preserve observation time. On-change checks are display-only;
-                    # they never qualify as fresh measured market capacity.
-                    sample = power_sample(entity, max_age=86390, hold=binding.get("reporting_mode", "on_change") == "on_change")
+                    binding.update(sensor_observation(entity, binding))
+                    # Send every valid current value regardless of inferred cadence.
+                    # Old reports retain their sensor timestamp and get a separate
+                    # successful HA check, never invented fresh market capacity.
+                    sample = power_sample(entity) or power_sample(entity, hold=True)
                     if not sample:
                         binding["measurement_status"] = measurement_status(entity)
                         continue
@@ -862,6 +946,11 @@ async def disconnect():
     return {"ok": True}
 
 
+@app.get('/sensor-insight')
+async def get_sensor_insight(entity_id: str):
+    return await sensor_insight(entity_id)
+
+
 @app.get("/entities")
 async def entities():
     try:
@@ -883,7 +972,8 @@ async def entities():
 class BindingRequest(BaseModel):
     control_consent: bool = False
     kind: Literal["HEAT_PUMP", "EV_CHARGER", "OVEN", "WATER_HEATER", "UNDERFLOOR_HEATING", "BATTERY", "HVAC", "SAUNA", "GENERIC_LOAD"] | None = None
-    reporting_mode: Literal["periodic", "on_change"] = "on_change"
+    # Accept legacy clients, but never let their mode override automatic sampling.
+    reporting_mode: Literal["auto", "periodic", "on_change"] = "auto"
     entity_id: str = Field(max_length=200)
     power_entity: str = Field(max_length=200)
     name: str = Field(min_length=1, max_length=120)
@@ -907,7 +997,7 @@ async def bind(body: BindingRequest):
             raise HTTPException(409, "Koble til SMARTi først")
         if any(b["entity_id"] == body.entity_id or b["power_entity"] == body.power_entity for b in state["bindings"]):
             raise HTTPException(409, "Enheten eller effektsensoren er allerede valgt")
-        state["bindings"].append({**body.model_dump(), "local_id": str(uuid4()), "device_id": None, "kind": body.kind or "GENERIC_LOAD", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True, "physical_control_enabled": body.control_consent and domain in ("switch", "climate"), "portal_managed": True})
+        state["bindings"].append({**body.model_dump(), **sensor_observation(items[body.power_entity]), "local_id": str(uuid4()), "device_id": None, "kind": body.kind or "GENERIC_LOAD", "capabilities": capabilities + ["READ_POWER"], "local_enabled": True, "physical_control_enabled": body.control_consent and domain in ("switch", "climate"), "portal_managed": True})
         save_state(state)
     await sync_now()
     return {"ok": True}
@@ -991,7 +1081,9 @@ async def edit_binding(local_id: str, body: BindingRequest):
             raise HTTPException(409, "Enheten eller målingen brukes allerede av en annen enhet")
         if any(c.get("local_id") == local_id and c["state"] not in ("RESTORED", "REJECTED") for c in load_control()["commands"].values()):
             raise HTTPException(409, "Tidligere styring må tilbakeføres før du endrer entitet. Kontroller enheten i Home Assistant.")
+        observation = sensor_observation(items[body.power_entity], binding if binding.get('power_entity') == body.power_entity else None)
         binding.update(body.model_dump(exclude_none=True))
+        binding.update(observation)
         binding["physical_control_enabled"] = body.control_consent and domain in ("switch", "climate")
         binding["edit_permission_repaired"] = True
         binding.update(revision=str(uuid4()), needs_sync=True, kind=body.kind or binding.get("kind", "GENERIC_LOAD"), capabilities={"switch": ["TURN_ON", "TURN_OFF"], "climate": ["SET_TEMPERATURE"], "number": []}[domain] + ["READ_POWER"], measurement_status="Endringen venter på synkronisering med SMARTi.")
